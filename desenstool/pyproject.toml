@@ -1,0 +1,18 @@
+[project]
+name = "desensitization-tool"
+version = "0.1.0"
+description = "一键脱敏本地脚本：本地识别敏感标识符并脱敏，映射表 AES 加密分离存储"
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=42.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6.23",
+    "pdfminer.six>=20221105",
+]
+
+[project.optional-dependencies]
+presidio = ["presidio-analyzer", "presidio-anonymizer"]
+
+[tool.uv]
+package = false
