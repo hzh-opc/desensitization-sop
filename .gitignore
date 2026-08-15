@@ -1,0 +1,19 @@
+# 虚拟环境 / 缓存（不应入库）
+desenstool/.venv/
+desenstool/__pycache__/
+__pycache__/
+*.pyc
+
+# 系统文件
+.DS_Store
+
+# 脱敏运行产物（按需，避免误提交密钥/副本/回填件）
+.desensitize_keys/
+desensitized/
+restored/
+desensitize_report.json
+desensitize_audit.md
+*.json.enc
+
+# Python 工具/缓存
+.pytest_cache/
