@@ -2,6 +2,10 @@
 
 本文件按时间倒序记录重大变更。日常细节以 Git 提交为准。
 
+## v2.4.1 · 2026-08-17（install.py Windows 沙箱安装修复）
+
+- **修复 `install.py` 在 Agent 会话内的 Windows 沙箱安装失败**：WorkBuddy / Claude 等 Agent 经 `sitecustomize.py` 注入「安全删除」shim，仅当 `CODEBUDDY_SESSION_ID` / `CLAUDE_SESSION_ID` 存在时激活，会把所有删除拦截进回收站（fail-closed）。Windows 沙箱无回收站时，uv 构建 `antlr4-python3-runtime`（rapidocr→omegaconf 依赖链）删除临时文件会失败、导致整个 venv 依赖装不上（报 `SAFE_DELETE_FAIL_CLOSED ... windows-sandbox-recycle-bin-unavailable`）。`install.py` 现于 `main()` 起始自动剥离这两个环境变量，并对 `uv add` / `uv sync` 子进程 env 防御性再剥离，恢复常规删除；README 新增 **FAQ Q11** 说明现象与旧版手动 `unset` 解法（PowerShell：`Remove-Item Env:\CODEBUDDY_SESSION_ID, Env:\CLAUDE_SESSION_ID`）。卸载/清理同理。
+
 ## v2.4 · 2026-08-17（本地预处理关卡 + 实际解密/OCR + 审查修复）
 
 - **新增 `preprocess` 本地预处理关卡（防割裂）**：扫描输入并分类 `encrypted`/`image`/`image_pdf`/`no_lib`/`error`/`empty`/`unsupported`，并**实际执行**本地解密与本地 OCR（数据全程不出本机），产出 `desensitize_preprocess.json` + 确认单 `desensitize_preprocess_summary.md`——① 原文件与未脱敏副本的保存/外发情况表（均🚫禁止外传）；② OCR 结果需用户逐项校对提醒；③ 预处理异常清单（文件/类别/原因/建议，须另行处理后发回 AI Agent）；④ 确认闸门——`run --preprocess-manifest` 会再次校验：清单仍含异常则拒绝执行，异常清完才放行。`--no-auto` 可降级为仅分类提醒。

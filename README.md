@@ -226,6 +226,9 @@ A. 会。尤其中文姓名/地址在无语境时易漏报。所以本 SOP 强�
 **Q10. 卸载会删我的原始数据吗？**
 A. 不会。`uninstall.py` 只删 `skills/desensitization-sop` 目录与记忆文件中的常驻规则，绝不递归父目录、不触碰任何原始敏感数据。默认 dry-run 预览，确认后才删除。
 
+**Q11. Windows 上 `uv add` 报 `SAFE_DELETE_FAIL_CLOSED ... windows-sandbox-recycle-bin-unavailable` 怎么办？**
+A. 这是在 **Agent 会话内**跑 `install.py` 时才会遇到的环境问题，不是技能本身的 bug。WorkBuddy / Claude 等 Agent 会在 Python 启动时经 `sitecustomize.py` 注入「安全删除」shim：`CODEBUDDY_SESSION_ID` / `CLAUDE_SESSION_ID` 存在时，所有删除被拦截进回收站（fail-closed）。Windows 沙箱无回收站，uv 构建 wheel（如 `rapidocr → omegaconf → antlr4-python3-runtime`）删除临时文件就会失败、导致整个 venv 依赖装不上。**新版 `install.py` 已自动剥离这两个环境变量**，一般无需手动处理；若你用的是尚未含此修复的旧版，手动 `unset CODEBUDDY_SESSION_ID CLAUDE_SESSION_ID`（PowerShell：`Remove-Item Env:\CODEBUDDY_SESSION_ID, Env:\CLAUDE_SESSION_ID`）后再跑即可，卸载/清理同理。
+
 ---
 
 ## 署名与许可
