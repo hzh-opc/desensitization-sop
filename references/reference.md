@@ -1,4 +1,4 @@
-# 敏感信息脱敏操作 SOP · 操作详述（reference.md）
+# 敏感信息脱敏操作 SOP · 操作详述（references/reference.md）
 
 > **本文件定位**：技能的**按需参考文档**（不随技能自动加载）。
 > 执行所必需的最小规则（11 项上云前自查 + 审计模板）见 `SKILL.md`；GitHub 项目说明见 `README.md`。
@@ -111,7 +111,7 @@ desensitize.py preprocess <文件或目录> [--recursive]
 - **本地 OCR（rapidocr + onnxruntime，v2.4 起）**：纯 pip 安装，**模型（PP-OCRv6 det/cls/rec）随 wheel 捆绑，完全离线、数据不出本机**，无需任何外部服务/端口/守护进程。图片直接识别；图片型 PDF 由 **pypdfium2** 渲染页面后识别。识别前把图像归一化到最长边 ≤2000px、并按尺寸自适应 `Det.limit_side_len`（实测 1000–2100px 为稳定识别区；默认 736 会把整页文字压碎、2500px+ det 不稳定）。已知弱项：**单行极端宽高比图片**（如 1000×120 横幅）识别率低，请改用正常版面或截图分行。
 - **本地解密**：加密 PDF 用 **pikepdf**（封装 QPDF，稳健）产出未加密副本；加密 Office 用 **msoffcrypto-tool**。密码来自 `--passwords-file`（每行一个候选；该文件本身含敏感信息，**严禁外传**），缺失时该文件进入③异常清单、由用户本地处理后发回。
 - **PDF 文本抽取**：v2.4 起由 pdfminer.six 换成 **pypdfium2**（Chrome 同款 PDFium，C 实现，快且对畸形 PDF 稳健；与 OCR 渲染共用一库）。
-- **Python 版本**：标准（非 free-threaded）CPython **≥3.10 且 <3.14**（onnxruntime 无 free-threaded wheel、3.14 支持未完备），`desenstool/.python-version` 锁定 3.13。
+- **Python 版本**：标准（非 free-threaded）CPython **≥3.10 且 <3.14**（onnxruntime 无 free-threaded wheel、3.14 支持未完备），`scripts/.python-version` 锁定 3.13。
 - **优雅降级**：无密码文件 / OCR 库缺失时，对应项**不静默放过**，而是进入③异常清单等待用户处理，绝不假装已处理。
 - **部署注意**：headless Linux 服务器上 opencv-python 需系统库 `libgl1`（`apt-get install -y libgl1`）。
 
@@ -251,12 +251,12 @@ desensitize.py preprocess <文件或目录> [--recursive]
 
 ## 配套一键脱敏本地脚本
 
-技能目录内附带 `desenstool/desensitize.py`——一个**本地运行、数据不出本机**的一键脱敏命令行工具，供 AI Agent 在上云前快速执行脱敏。
+技能目录内附带 `scripts/desensitize.py`——一个**本地运行、数据不出本机**的一键脱敏命令行工具，供 AI Agent 在上云前快速执行脱敏。
 
-- **运行环境**：`desenstool/` 是一个 **uv 工程**（`pyproject.toml` 声明依赖），由 `uv add` 创建虚拟环境（`.venv`）并安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`；不污染系统或其他项目环境。
+- **运行环境**：`scripts/` 是一个 **uv 工程**（`pyproject.toml` 声明依赖），由 `uv add` 创建虚拟环境（`.venv`）并安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`；不污染系统或其他项目环境。
 - **调用方式**：
-  - 离线（推荐）：`~/.workbuddy/skills/desensitization-sop/desenstool/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/desenstool/desensitize.py scan|run <输入> [--out ./desensitized --keys ./.desensitize_keys --mode hybrid|mask|token|redact --recursive --names 姓名清单.txt --cn-enhance]`
-  - 或用 uv：`uv run --project ~/.workbuddy/skills/desensitization-sop/desenstool python …`
+  - 离线（推荐）：`~/.workbuddy/skills/desensitization-sop/scripts/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py scan|run <输入> [--out ./desensitized --keys ./.desensitize_keys --mode hybrid|mask|token|redact --recursive --names 姓名清单.txt --cn-enhance]`
+  - 或用 uv：`uv run --project ~/.workbuddy/skills/desensitization-sop/scripts python …`
 - **子命令**：
   - `scan`：仅扫描并报告命中（身份证/手机/银行卡/邮箱/IP/车牌/护照/代码密钥，开启 `--cn-enhance` 时含中文姓名/地址/机构名），不生成文件。
   - `run`：输出脱敏副本到 `--out`（默认 `./desensitized`，可上云）；加密映射表到 `--keys`（默认 `./.desensitize_keys`，含 `*.key` 密钥文件，权限 600，**不可与副本同传**）；并生成 `desensitize_report.json` 元数据（命中统计/恢复安全性/碰撞/skip）。

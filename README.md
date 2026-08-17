@@ -9,7 +9,7 @@
 > **配套技能**：`desensitization-sop`（WorkBuddy 技能，自动执行「上云前自查」与「任务后审计汇总」）
 > **本仓库三份文件分工**：
 > - `SKILL.md`：**自动加载的执行规范**（11 项上云前自查 + 审计模板），AI Agent 每次调用必走；
-> - `reference.md`：**按需读取的操作详述**（合规依据、分级判定、六步流程、精度影响、场景专项、工具选型、脚本说明、附录），不自动加载；
+> - `references/reference.md`：**按需读取的操作详述**（合规依据、分级判定、六步流程、精度影响、场景专项、工具选型、脚本说明、附录），不自动加载；
 > - `README.md`：本文件，**GitHub 项目说明**。
 
 ---
@@ -44,19 +44,19 @@
 
 ```bash
 # 1) 扫描：看看本地文件里有哪些敏感字段（不生成任何文件）
-python desenstool/desensitize.py scan ./data/ --recursive
+python scripts/desensitize.py scan ./data/ --recursive
 
 # 2) 脱敏：生成脱敏副本 + 加密映射表（默认 hybrid 模式）
-python desenstool/desensitize.py run ./data/ \
+python scripts/desensitize.py run ./data/ \
     --out ./desensitized --keys ./.desensitize_keys --mode hybrid
 
 # 3) 上云：只把 ./desensitized 里的副本发给大模型；.desensitize_keys 永不外传
 # 4) 任务后审计（基于 run 报告自动生成审计文档：九节，对齐 11 项自查清单）
-python desenstool/desensitize.py audit --report ./desensitize_report.json
+python scripts/desensitize.py audit --report ./desensitize_report.json
 
 # 5) 本地复核 / 回填：用映射表解密或还原实名（均在本地，无需上云）
-python desenstool/desensitize.py decrypt --keys ./.desensitize_keys
-python desenstool/desensitize.py restore --keys ./.desensitize_keys --input ./desensitized --out ./restored
+python scripts/desensitize.py decrypt --keys ./.desensitize_keys
+python scripts/desensitize.py restore --keys ./.desensitize_keys --input ./desensitized --out ./restored
 ```
 
 > 子命令：`scan`（报告命中）/ `run`（脱敏+映射表）/ `decrypt`（本地解密映射表）/ `restore`（回填为含原值内部文档）/ `audit`（自动审计文档）。
@@ -85,7 +85,7 @@ git clone https://github.com/hzh-opc/desensitization-sop.git /tmp/desensitizatio
 python /tmp/desensitization-sop/install.py
 
 # 3) 验证（脚本已自动跑通全环；如需手动复验）
-python /tmp/desensitization-sop/desenstool/desensitize.py scan --help
+python /tmp/desensitization-sop/scripts/desensitize.py scan --help
 ```
 
 > 若当前 AI 工具已运行，安装完成后请按 Agent 提示**重启它（或重开会话）**以加载 `desensitization-sop`。
@@ -98,7 +98,7 @@ python /tmp/desensitization-sop/desenstool/desensitize.py scan --help
 |---|---|
 | 1 | 自动检测当前 AI 工具，定位其 `skills/` 目录与记忆/指令文件 |
 | 2 | 从 GitHub（`https://github.com/hzh-opc/desensitization-sop`）下载并安装技能（git 优先，失败自动降级 zip；亦支持 `--source local` 离线安装） |
-| 3 | 自动检测 / 创建 Python 虚拟环境（`desenstool/.venv`）并安装依赖（**优先 `uv add`**；无 uv 时回退 `venv`+`pip`） |
+| 3 | 自动检测 / 创建 Python 虚拟环境（`scripts/.venv`）并安装依赖（**优先 `uv add`**；无 uv 时回退 `venv`+`pip`） |
 | 4 | 实测脚本是否正常运行：`scan` → `run(hybrid)` → `decrypt` → `restore` 全环验证 |
 | 5 | 把「任务执行前自动敏感信息检测」设为**常驻规则**（幂等写入记忆文件） |
 
@@ -173,9 +173,9 @@ python3 uninstall.py --no-backup --yes       # 不备份直接删除（慎用）
 |---|---|
 | `README.md`（本文件） | 项目介绍、署名许可、安装卸载、快速上手、FAQ |
 | `SKILL.md` | **AI Agent 自动加载**：执行规范、11 项上云前自查清单、审计模板、脚本调用入口 |
-| `reference.md` | 边界场景按需 `Read`：合规依据、三级风险判定、准标识符重识别、六步流程、精度影响对照、场景专项、工具选型、脚本完整说明、附录 |
+| `references/reference.md` | 边界场景按需 `Read`：合规依据、三级风险判定、准标识符重识别、六步流程、精度影响对照、场景专项、工具选型、脚本完整说明、附录 |
 
-`reference.md` 章节索引：目标与原则 · 背景与原思路修订 · 合规依据（引用来源）· §0 输入检测闸门 · §1 关键概念 · §2 敏感信息分类分级 · §3 脱敏操作流程（六步）· §4 脱敏对 AI 任务精度的影响 · §5 场景专项要求 · §6 工具与技术选型 · 配套一键脱敏本地脚本 · §7 应急、改进与附录。
+`references/reference.md` 章节索引：目标与原则 · 背景与原思路修订 · 合规依据（引用来源）· §0 输入检测闸门 · §1 关键概念 · §2 敏感信息分类分级 · §3 脱敏操作流程（六步）· §4 脱敏对 AI 任务精度的影响 · §5 场景专项要求 · §6 工具与技术选型 · 配套一键脱敏本地脚本 · §7 应急、改进与附录。
 
 ---
 
@@ -200,13 +200,13 @@ python3 uninstall.py --no-backup --yes       # 不备份直接删除（慎用）
 A. 本地文件可能含身份证号、手机号、银行卡、密钥 Token、财务报表等敏感信息。直传 = 把敏感数据交给不可信的云端 LLM。本 SOP 让你的「个人标识/密钥」留在本地，只把脱敏副本送出去，分析结论不受影响（数值精度保留）。
 
 **Q2. 脱敏后 AI 还能正常分析吗？精度会丢吗？**
-A. 对绝大多数任务**基本无损**。标识符类脱敏（掩码/令牌）只去掉「真实身份」，保留数值与关系结构；财务/持仓/金额按本 SOP 原则「去标识、不扭曲数值」——只去个人标识，绝不做泛化或随机化（那才会毁掉勾稽关系与估值）。详见 `reference.md` §4。
+A. 对绝大多数任务**基本无损**。标识符类脱敏（掩码/令牌）只去掉「真实身份」，保留数值与关系结构；财务/持仓/金额按本 SOP 原则「去标识、不扭曲数值」——只去个人标识，绝不做泛化或随机化（那才会毁掉勾稽关系与估值）。详见 `references/reference.md` §4。
 
 **Q3. 工具会联网吗？我的数据会离开本机吗？**
 A. 不会。`desensitize.py` 纯本地运行，正则识别与 AES 加密均在本地；`--cn-enhance` 也是本地正则、无需下载模型。只有你**主动**把 `./desensitized/` 副本发给云端模型时数据才出本机，映射表永不离开本地。
 
 **Q4. 需要 Python 什么版本？**
-A. 标准（非 free-threaded）CPython **≥ 3.10 且 < 3.14**（onnxruntime 无 free-threaded wheel、3.14 支持未完备；`desenstool/.python-version` 锁定 3.13）。推荐用 uv 管理依赖（`install.py` 会优先 `uv add`，无 uv 时回退 `venv`+`pip`）。
+A. 标准（非 free-threaded）CPython **≥ 3.10 且 < 3.14**（onnxruntime 无 free-threaded wheel、3.14 支持未完备；`scripts/.python-version` 锁定 3.13）。推荐用 uv 管理依赖（`install.py` 会优先 `uv add`，无 uv 时回退 `venv`+`pip`）。
 
 **Q5. 脱敏后还能还原吗？用于生成工资单/申报表怎么办？**
 A. `hybrid`/`token`/`mask` 模式可逆：本地用 `decrypt` 查看映射表，或 `restore` 把脱敏副本**回填**为含原值的本地内部文档（用于工资单/申报表等需实名的交付物）。回填产物恢复为实名，仅限本地使用、勿随副本外传。`redact` 模式不可逆，不要用于需还原的数据。
@@ -237,10 +237,10 @@ A. 这是在 **Agent 会话内**跑 `install.py` 时才会遇到的环境问题�
 |---|---|
 | 作者 / 维护者 | hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） |
 | 仓库 | https://github.com/hzh-opc/desensitization-sop |
-| 版本 | v2.4 · 2026-08-17 ① 新增 `preprocess` 本地预处理关卡：自动解密加密文档（pikepdf / msoffcrypto-tool）+ 纯本地 OCR（rapidocr + onnxruntime，模型随 wheel 捆绑、完全离线），产出确认单（保存/外发清单、OCR 校对提醒、异常清单、run 闸门）；② PDF 文本抽取由 pdfminer.six 换成 **pypdfium2**（与 OCR 渲染共用一库）；③ Python 版本明确为标准 CPython ≥3.10 且 <3.14；④ 全量回归测试通过（详见 `CHANGELOG.md`） |
+| 版本 | v2.4.2 · 2026-08-17 ① 目录/文件布局对齐 skill-creator 规范：`desenstool/`→`scripts/`、`reference.md`→`references/reference.md`、SKILL.md 补全 `agent_created: true`；② 功能与 v2.4 一致（`preprocess` 本地预处理关卡：自动解密加密文档（pikepdf / msoffcrypto-tool）+ 纯本地 OCR（rapidocr + onnxruntime，模型随 wheel 捆绑、完全离线），产出确认单（保存/外发清单、OCR 校对提醒、异常清单、run 闸门）；③ PDF 文本抽取由 pdfminer.six 换成 **pypdfium2**（与 OCR 渲染共用一库）；④ Python 版本明确为标准 CPython ≥3.10 且 <3.14；⑤ 全量回归测试通过（详见 `CHANGELOG.md`） |
 | 原始思路 | 《脱敏资料的处理与生成台》 |
 | 许可 | 见仓库根目录 [`LICENSE`](LICENSE)（本项目采用 **Apache License 2.0**，可自由使用、修改、分发；商用须保留版权与许可声明、标注修改、附 NOTICE）；**所引用的国家标准、行业标准以主管部门官方发布文本为准** |
-| 文件结构 | `SKILL.md`：自动加载的执行规范；`reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`：跨平台一键安装/卸载；`desenstool/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`），数据不出本机 |
+| 文件结构 | `SKILL.md`：自动加载的执行规范；`references/reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`：跨平台一键安装/卸载；`scripts/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`），数据不出本机 |
 
 ---
 

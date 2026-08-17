@@ -44,7 +44,7 @@ unzip /tmp/desen.zip -d /tmp && cd /tmp/desensitization-sop-main
 
 1. detect the current AI tool and locate its `skills/` directory + memory file;
 2. install the skill into that `skills/` directory (git clone preferred, zip fallback; `--source local` for offline);
-3. create the Python virtual environment (`desenstool/.venv`) and install dependencies — **`uv add` preferred**, falling back to `venv` + `pip`;
+3. create the Python virtual environment (`scripts/.venv`) and install dependencies — **`uv add` preferred**, falling back to `venv` + `pip`;
 4. run a full `scan → run(hybrid) → decrypt → restore` round-trip verification;
 5. write the resident "input detection gate" rule into the tool's memory file (**idempotent** — safe to re-run).
 

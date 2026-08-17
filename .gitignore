@@ -1,6 +1,6 @@
 # 虚拟环境 / 缓存（不应入库）
-desenstool/.venv/
-desenstool/__pycache__/
+scripts/.venv/
+scripts/__pycache__/
 __pycache__/
 *.pyc
 

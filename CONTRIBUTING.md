@@ -4,12 +4,12 @@
 
 ## 提交 Issue
 - **Bug / 误报 / 漏报**：请附上（脱敏后的）样例与期望行为；中文姓名/地址的误报漏报请说明语境。
-- **功能建议**：说明使用场景与收益，最好给出 `reference.md` 对应是否需要补充。
+- **功能建议**：说明使用场景与收益，最好给出 `references/reference.md` 对应是否需要补充。
 
 ## 提交 Pull Request
 1. Fork 本仓库并基于 `main` 分支创建特性分支（`feat/...`、`fix/...`）。
-2. 保持三文件职责清晰：`SKILL.md`（自动加载执行规范）、`reference.md`（按需详述）、`README.md`（项目说明），不要互相搬运大段内容。
-3. 脚本位于 `desenstool/desensitize.py`，纯标准库 + `cryptography` 等声明在 `pyproject.toml` / `requirements.txt`；**禁止引入需要联网下载模型的重依赖作为默认路径**。
+2. 保持三文件职责清晰：`SKILL.md`（自动加载执行规范）、`references/reference.md`（按需详述）、`README.md`（项目说明），不要互相搬运大段内容。
+3. 脚本位于 `scripts/desensitize.py`，纯标准库 + `cryptography` 等声明在 `pyproject.toml` / `requirements.txt`；**禁止引入需要联网下载模型的重依赖作为默认路径**。
 4. 数据不出本机是底线：`desensitize.py` 不得有任何对外网络请求。
 5. 若改动脱敏逻辑，请补充/更新验证样例，并确保 `install.py` 的端到端实测（`scan → run → decrypt → restore`）通过。
 6. 同步更新 `README.md` 的版本行与 `CHANGELOG.md`。

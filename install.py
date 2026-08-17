@@ -272,13 +272,13 @@ def _find_uv():
     return None
 
 
-def _write_minimal_pyproject(desenstool: Path):
-    """desenstool 尚未声明为 uv 工程时，写入最小 pyproject.toml。
+def _write_minimal_pyproject(scripts: Path):
+    """scripts 尚未声明为 uv 工程时，写入最小 pyproject.toml。
 
-    之后由 `uv add` 追加具体依赖，使 desenstool 成为标准的 uv 工程。
+    之后由 `uv add` 追加具体依赖，使 scripts 成为标准的 uv 工程。
     """
-    desenstool.mkdir(parents=True, exist_ok=True)
-    (desenstool / "pyproject.toml").write_text(
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "pyproject.toml").write_text(
         '[project]\n'
         'name = "desensitization-tool"\n'
         'version = "0.1.0"\n'
@@ -296,13 +296,13 @@ def ensure_venv(skill_dir: Path, skip=False):
     """返回 venv 的 python 路径；失败返回 None。
 
     依赖管理统一使用 uv（优先），尽量用 `uv add` 声明并安装依赖：
-      - desenstool 必须是 uv 工程（含 pyproject.toml）；已存在则保留既有声明、不覆盖；
-      - `uv add <deps>` 会把依赖写入 pyproject.toml 并安装进 desenstool/.venv
+      - scripts 必须是 uv 工程（含 pyproject.toml）；已存在则保留既有声明、不覆盖；
+      - `uv add <deps>` 会把依赖写入 pyproject.toml 并安装进 scripts/.venv
         （uv 自动创建 .venv，无需 venv 自带 pip，兼容“python -m venv 不含 pip”的精简 Python）；
       - 回退路径：python -m venv + ensurepip / get-pip.py，再 pip install -r requirements.txt。
     """
-    desenstool = skill_dir / "desenstool"
-    vd = desenstool / ".venv"
+    scripts = skill_dir / "scripts"
+    vd = scripts / ".venv"
     py = venv_python(vd)
 
     if skip:
@@ -315,14 +315,14 @@ def ensure_venv(skill_dir: Path, skip=False):
     uv = _find_uv()
     req = skill_dir / "requirements.txt"
 
-    # 1) 确保 desenstool 是 uv 工程（pyproject.toml）；已存在则不覆盖
-    if not (desenstool / "pyproject.toml").exists():
-        _write_minimal_pyproject(desenstool)
-        log("已为 desenstool 写入最小 pyproject.toml（uv 工程）。", "OK")
+    # 1) 确保 scripts 是 uv 工程（pyproject.toml）；已存在则不覆盖
+    if not (scripts / "pyproject.toml").exists():
+        _write_minimal_pyproject(scripts)
+        log("已为 scripts 写入最小 pyproject.toml（uv 工程）。", "OK")
 
     # 2) 优先用 uv add 安装依赖（无需 venv 自带 pip）
     if uv:
-        # 与 requirements.txt / desenstool/pyproject.toml 保持一致：
+        # 与 requirements.txt / scripts/pyproject.toml 保持一致：
         # 基础抽取/解密库 + v2.4 起纯本地 OCR（rapidocr + onnxruntime + pypdfium2，
         # 模型随 wheel 捆绑、完全离线）。
         deps = ["cryptography", "python-docx", "openpyxl", "python-pptx",
@@ -333,13 +333,13 @@ def ensure_venv(skill_dir: Path, skip=False):
         # 防御性剥离 Agent 安全删除 shim 触发变量（见 _neutralize_safe_delete_shim）。
         for k in SAFE_DELETE_TRIGGER_VARS:
             env.pop(k, None)
-        r = subprocess.run([uv, "add"] + deps, cwd=str(desenstool),
+        r = subprocess.run([uv, "add"] + deps, cwd=str(scripts),
                            capture_output=True, text=True, env=env)
         if r.returncode != 0:
             # 依赖可能已在 pyproject 中（uv add 幂等）；失败时退一步 uv sync
             log("uv add 失败，尝试 uv sync：%s"
                 % (r.stderr.strip() or r.stdout.strip()), "WARN")
-            r2 = subprocess.run([uv, "sync"], cwd=str(desenstool),
+            r2 = subprocess.run([uv, "sync"], cwd=str(scripts),
                                 capture_output=True, text=True, env=env)
             if r2.returncode != 0:
                 log("uv sync 失败：%s" % (r2.stderr.strip() or r2.stdout.strip()), "FAIL")
@@ -410,7 +410,7 @@ def verify(skill_dir: Path, py: Path, skip=False):
     if skip or py is None:
         return [("脚本实测（已跳过）", True, "通过 --skip-tests")]
 
-    script = skill_dir / "desenstool" / "desensitize.py"
+    script = skill_dir / "scripts" / "desensitize.py"
     if not script.exists():
         return [("脚本存在性", False, "找不到 %s" % script)]
 
@@ -577,7 +577,7 @@ def main():
     log("Python venv：%s" % (py if py else "（未创建/跳过）"))
     log("脚本实测：%d/%d 通过" % (pass_n, total))
     log("常驻规则：%s" % ("已写入" if ok else "失败"))
-    log("调用示例：%s desenstool/desensitize.py scan <文件>"
+    log("调用示例：%s scripts/desensitize.py scan <文件>"
         % (str(py) if py else "python"), "INFO")
 
     all_ok = (py is not None or args.skip_venv) and (pass_n == total) and ok

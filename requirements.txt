@@ -1,5 +1,5 @@
-# 信息脱敏上云 SOP —— desenstool 运行时依赖
-# 由 install.py 在 desenstool/.venv 中自动安装
+# 信息脱敏上云 SOP —— scripts 运行时依赖
+# 由 install.py 在 scripts/.venv 中自动安装
 # Python 版本：标准 CPython >=3.10 且 <3.14（onnxruntime 无 free-threaded wheel）
 cryptography>=42.0.0
 python-docx>=1.1.0

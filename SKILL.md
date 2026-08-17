@@ -6,13 +6,14 @@ description: >-
   若检出 → 先本地脱敏再执行任务；若未检出 → 忽略、直接执行任务（零额外负担）。
   此外，当任务涉及将本地内容送至云端大模型（WorkBuddy 云端模型、OpenClaw、Claude、Codex、GPT 等）处理时，
   须在「上云前」自动执行脱敏自查，在「任务结束后」自动生成审计汇总。
-  本文件仅含执行所必需的最小规则；判定依据、分级对照表、精度影响、工具部署等详述见同目录 reference.md（按需读取，不自动加载；GitHub 项目说明见 README.md）。
-version: "2.4.1"
+  本文件仅含执行所必需的最小规则；判定依据、分级对照表、精度影响、工具部署等详述见同目录 references/reference.md（按需读取，不自动加载；GitHub 项目说明见 README.md）。
+version: "2.4.2"
+agent_created: true
 ---
 
 # 信息脱敏上云 SOP（AI Agent 上云前 / 上云后闭环）
 
-> **版本** v2.4.1（2026-08-17） · **署名** hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） · **版权** Copyright 2026 hzh.opc，基于 [Apache License 2.0](LICENSE) 发布（保留声明、标注修改、附 NOTICE）。
+> **版本** v2.4.2（2026-08-17） · **署名** hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） · **版权** Copyright 2026 hzh.opc，基于 [Apache License 2.0](LICENSE) 发布（保留声明、标注修改、附 NOTICE）。
 
 核心方针（不可违背）：本地存储优先 · 最小必要 · 分类分级 · 脱敏后上云 · 可溯源 · 留审计 · 云端记忆禁存敏感信息。
 **原始敏感文件永远留本地，绝不整份上传。**
@@ -27,7 +28,7 @@ version: "2.4.1"
 ## 输入检测闸门（任何任务执行前的第一步）
 目标：**凡任务输入可能含敏感信息，先检测、按需脱敏，再执行任务；无敏感则直接执行，零额外负担。**
 按输入形态选择检测方式（均本地、离线、数据不出本机）：
-- **文本 / 聊天输入**：将待处理文本落地为临时文件后 `desensitize.py scan`；或按 reference.md §2 三级风险表快速判定。
+- **文本 / 聊天输入**：将待处理文本落地为临时文件后 `desensitize.py scan`；或按 references/reference.md §2 三级风险表快速判定。
 - **文件（单文件 / 目录）**：`desensitize.py scan <文件或目录> --recursive`（支持文本/代码/Office/PDF/SQLite；图片/加密/纯图片 PDF 会进 skip manifest 并提醒）。
 - **数据库 / 程序查询结果**：先在**本地**导出为文本（SQL dump / CSV / `sqlite3 .dump`），再 `scan`；切勿直接把查询结果原文外传。
 - **知识库 / 网页抓取**：将抓取内容落地为文本后再 `scan`；同时遵守"云端记忆/知识库禁存敏感原文"（清单第 10 项）。
@@ -44,8 +45,8 @@ version: "2.4.1"
 
 在执行 `scan`/`run` 之前，先跑一次（默认即**自动解密 / OCR**，全程离线、数据不出本机）：
 ```
-~/.workbuddy/skills/desensitization-sop/desenstool/.venv/bin/python \
-  ~/.workbuddy/skills/desensitization-sop/desenstool/desensitize.py \
+~/.workbuddy/skills/desensitization-sop/scripts/.venv/bin/python \
+  ~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py \
   preprocess <文件或目录> [--recursive] [--passwords-file ./pw.txt] \
              [--out-dir ./preprocessed]
 # 仅想分类+提醒（旧行为）可加 --no-auto
@@ -68,14 +69,14 @@ version: "2.4.1"
 
 > 红线：脱敏副本可上云；上述一切未脱敏材料严禁外传。自动化识别非 100%，预处理后仍须人工复核，禁止"一键脱敏即上云"。
 
-技术说明（实现细节见 reference.md §0.4）：
+技术说明（实现细节见 references/reference.md §0.4）：
 - **本地 OCR** 用 **rapidocr + onnxruntime**（纯 pip 安装，**模型随 wheel 捆绑，完全离线、数据不出本机**，无需任何外部服务/端口；中文识别基于 PP-OCRv6 模型）。图片直接识别；图片型 PDF 由 **pypdfium2** 渲染页面后识别。零部署、零协议风险。
 - **本地解密**：加密 PDF 用 **pikepdf**（封装 QPDF，稳健）产出未加密副本；加密 Office 用 **msoffcrypto-tool**。密码来自 `--passwords-file`（每行一个候选；该文件本身含敏感信息，**严禁外传**），缺失时该文件列为异常、由用户本地处理后发回。
 - **优雅降级**：当无密码文件 / OCR 库缺失时，对应项**不静默放过**，而是进入③异常清单，等待用户本地处理后发回，绝不假装已处理。
 
 ## 动作一：上云前自查清单（11 项，逐项核对）
 1. 原始敏感文件是否仍完整留本地、未整份上传？
-2. 是否已逐份识别并标记敏感字段与级别（高/中/低，判定见 reference.md §2）？
+2. 是否已逐份识别并标记敏感字段与级别（高/中/低，判定见 references/reference.md §2）？
 3. 脱敏方法是否与级别匹配（高风险已剥离直接标识符 + 高风险准标识符）？
 4. 脱敏副本是否仅来自 `工作区/desensitized/` 目录？
 5. 映射表是否与副本分离、已加密（存 `工作区/.desensitize_keys/`，密钥不入库）？
@@ -106,11 +107,11 @@ version: "2.4.1"
 留存：重要/核心数据相关日志 ≥ 1–3 年；建议每季度回看重评估。
 
 ## 一键脱敏本地脚本（上云前执行脱敏的可调用工具）
-位置：`~/.workbuddy/skills/desensitization-sop/desenstool/desensitize.py`，配套 `desenstool/` 是一个 **uv 工程**（`pyproject.toml` 声明依赖，`.python-version` 锁定 **Python 3.13 标准版**——onnxruntime 无 free-threaded wheel，3.14 支持未完备，版本按全部依赖兼容性综合确定），由 `uv sync` 创建虚拟环境（`.venv`）并安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`，**数据全程不出本机**。
+位置：`~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py`，配套 `scripts/` 是一个 **uv 工程**（`pyproject.toml` 声明依赖，`.python-version` 锁定 **Python 3.13 标准版**——onnxruntime 无 free-threaded wheel，3.14 支持未完备，版本按全部依赖兼容性综合确定），由 `uv sync` 创建虚拟环境（`.venv`）并安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`，**数据全程不出本机**。
 
 调用（任选其一）：
-- 可靠（离线，推荐）：`~/.workbuddy/skills/desensitization-sop/desenstool/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/desenstool/desensitize.py scan|run|restore|audit|decrypt <输入> [--out ./desensitized --keys ./.desensitize_keys --mode hybrid|mask|token|redact --recursive --names 姓名清单.txt --cn-enhance]`
-- 或用 uv：`uv run --project ~/.workbuddy/skills/desensitization-sop/desenstool python ~/.workbuddy/skills/desensitization-sop/desenstool/desensitize.py ...`
+- 可靠（离线，推荐）：`~/.workbuddy/skills/desensitization-sop/scripts/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py scan|run|restore|audit|decrypt <输入> [--out ./desensitized --keys ./.desensitize_keys --mode hybrid|mask|token|redact --recursive --names 姓名清单.txt --cn-enhance]`
+- 或用 uv：`uv run --project ~/.workbuddy/skills/desensitization-sop/scripts python ~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py ...`
 
 要点：
 - `preprocess`（**脱敏前先跑**）：本地预处理关卡（**实际解密 / OCR**）。自动解密加密文档、用 rapidocr 识别图片 / 图片型 PDF，产出 `./preprocessed/`（ready/ + ocr/）+ **确认单**（`desensitize_preprocess_summary.md`：原文件与未脱敏副本外发清单、OCR 校对提醒、异常清单、确认闸门）；是消除割裂感、防止漏脱敏与跳过异常的关键前置步骤。
@@ -135,12 +136,12 @@ version: "2.4.1"
 
 > 红线重申：脱敏副本可上云，原始文件与映射表（重识别钥匙）留本地且分离；**密码、加密原文件、已解密未脱敏副本、原始图片/OCR 文本同样严禁外传**；自动化识别非 100%，**禁止"一键脱敏即上云"，必须人工复核**预处理关卡与 skip manifest 中列出的未处理文件。
 
-## 判定与方法的快速索引（详述见同目录 reference.md，按需 Read）
-- 输入检测闸门（任务执行前通用前置，按输入形态检测 + 分支决策；含 0.4 本地预处理关卡：加密解密 / rapidocr OCR / 异常清单）：reference.md §0
-- 关键概念（去标识化 vs 匿名化、准标识符重识别）：reference.md §1
-- 三级风险判定表、准标识符聚合风险处理：reference.md §2
-- 六步脱敏流程、映射表安全条款：reference.md §3
-- 精度影响（"去标识不扭曲数值"）+ 方法对照表：reference.md §4
-- 财务/审计/投研/代码场景专项要求：reference.md §5
-- 工具选型（Presidio 本地部署、中文正则、AES 加密）、技术五族、静态/动态脱敏：reference.md §6
-- 应急与改进、附录（直接标识符/敏感个人信息速查）：reference.md §7
+## 判定与方法的快速索引（详述见同目录 references/reference.md，按需 Read）
+- 输入检测闸门（任务执行前通用前置，按输入形态检测 + 分支决策；含 0.4 本地预处理关卡：加密解密 / rapidocr OCR / 异常清单）：references/reference.md §0
+- 关键概念（去标识化 vs 匿名化、准标识符重识别）：references/reference.md §1
+- 三级风险判定表、准标识符聚合风险处理：references/reference.md §2
+- 六步脱敏流程、映射表安全条款：references/reference.md §3
+- 精度影响（"去标识不扭曲数值"）+ 方法对照表：references/reference.md §4
+- 财务/审计/投研/代码场景专项要求：references/reference.md §5
+- 工具选型（Presidio 本地部署、中文正则、AES 加密）、技术五族、静态/动态脱敏：references/reference.md §6
+- 应急与改进、附录（直接标识符/敏感个人信息速查）：references/reference.md §7
