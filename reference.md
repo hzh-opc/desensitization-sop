@@ -86,6 +86,37 @@
 - 闸门只做"检测 + 按需脱敏"，不阻断正常任务；清洁输入仅付出一次轻量 `scan`。
 - 自动化识别非 100%（中文尤弱），脱敏后必须人工复核，禁止"一键脱敏即上云"。
 
+### 0.4 本地预处理关卡（脱敏前必做 · 防割裂 · 自动解密 / OCR）
+
+> 加密文档、图片 / 图片型 PDF、抽取异常等若只在 `run` 末尾散落一句"跳过"，极易被后续流程忽略，造成割裂感与漏脱敏。故把它们**前置为统一关卡**：`preprocess` **直接执行**本地解密与本地 OCR，并把结果汇入**预处理确认单**，供用户确认 / 校对后，再进 `scan`/`run`。
+
+**命令**（默认即自动解密 / OCR，数据全程本地）：
+```
+desensitize.py preprocess <文件或目录> [--recursive]
+    [--passwords-file ./pw.txt] [--out-dir ./preprocessed]
+# 仅分类+提醒（旧行为）加 --no-auto
+```
+`preprocess` 在 `./preprocessed/` 下产出 `ready/`（解密后 + 原可直接处理文件）、`ocr/`（OCR 文本，未脱敏须校对）、`desensitize_preprocess.json` 与 **`desensitize_preprocess_summary.md`（确认单）**。确认单满足四点（详见 SKILL.md 同名章节）：
+
+**① 原文件与未脱敏副本 · 保存 / 外发情况**：确认单第一节表格列出每个原始文件与其未脱敏副本（解密副本 / OCR 文本 / ready 副本）的**保存位置（本地）与外发状态（🚫 禁止）**，供用户逐条确认绝不上云。
+- ⚠️ **严禁外传**：解密密码、加密原文件、已解密未脱敏副本、原始图片 / OCR 文本、映射表——全部留本地。仅在本地完成解密 + 脱敏后，脱敏副本方可上云。
+
+**② OCR 结果 · 需用户逐项校对**：确认单第二节逐条列出 OCR 产出文件（对应原始图片 / PDF），提醒用户**逐字校对**识别文本（重点关注姓名 / 证件号 / 银行卡 / 金额），确认无误后再脱敏。
+
+**③ 预处理异常清单（须另行处理后发回 AI Agent）**：解密失败（密码错误 / 非标加密）、OCR 库缺失、缺抽取库、文件损坏、未知二进制等，确认单第三节**详细列出**（文件 / 类别 / 原因 / 建议），并明确"异常未处理前禁止 run，请用户本地处理后将结果发回 AI Agent 重新纳入"。
+
+**④ 确认与继续（闸门）**：`run` 加 `--preprocess-manifest <确认单JSON>` 后**再次校验：清单仍含异常则拒绝执行**，异常清完才放行——从源头杜绝"跳过异常直接上云"。
+
+**实现要点**：
+- **本地 OCR（rapidocr + onnxruntime，v2.4 起）**：纯 pip 安装，**模型（PP-OCRv6 det/cls/rec）随 wheel 捆绑，完全离线、数据不出本机**，无需任何外部服务/端口/守护进程。图片直接识别；图片型 PDF 由 **pypdfium2** 渲染页面后识别。识别前把图像归一化到最长边 ≤2000px、并按尺寸自适应 `Det.limit_side_len`（实测 1000–2100px 为稳定识别区；默认 736 会把整页文字压碎、2500px+ det 不稳定）。已知弱项：**单行极端宽高比图片**（如 1000×120 横幅）识别率低，请改用正常版面或截图分行。
+- **本地解密**：加密 PDF 用 **pikepdf**（封装 QPDF，稳健）产出未加密副本；加密 Office 用 **msoffcrypto-tool**。密码来自 `--passwords-file`（每行一个候选；该文件本身含敏感信息，**严禁外传**），缺失时该文件进入③异常清单、由用户本地处理后发回。
+- **PDF 文本抽取**：v2.4 起由 pdfminer.six 换成 **pypdfium2**（Chrome 同款 PDFium，C 实现，快且对畸形 PDF 稳健；与 OCR 渲染共用一库）。
+- **Python 版本**：标准（非 free-threaded）CPython **≥3.10 且 <3.14**（onnxruntime 无 free-threaded wheel、3.14 支持未完备），`desenstool/.python-version` 锁定 3.13。
+- **优雅降级**：无密码文件 / OCR 库缺失时，对应项**不静默放过**，而是进入③异常清单等待用户处理，绝不假装已处理。
+- **部署注意**：headless Linux 服务器上 opencv-python 需系统库 `libgl1`（`apt-get install -y libgl1`）。
+
+> 红线：脱敏副本可上云；上述一切未脱敏材料严禁外传。预处理后仍须人工复核，禁止"一键脱敏即上云"。
+
 ---
 
 ## §1 关键概念（避免误判）
@@ -222,7 +253,7 @@
 
 技能目录内附带 `desenstool/desensitize.py`——一个**本地运行、数据不出本机**的一键脱敏命令行工具，供 AI Agent 在上云前快速执行脱敏。
 
-- **运行环境**：`desenstool/` 是一个 **uv 工程**（`pyproject.toml` 声明依赖），由 `uv add` 创建虚拟环境（`.venv`）并安装 `cryptography / python-docx / openpyxl / python-pptx / pdfminer.six`；不污染系统或其他项目环境。
+- **运行环境**：`desenstool/` 是一个 **uv 工程**（`pyproject.toml` 声明依赖），由 `uv add` 创建虚拟环境（`.venv`）并安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`；不污染系统或其他项目环境。
 - **调用方式**：
   - 离线（推荐）：`~/.workbuddy/skills/desensitization-sop/desenstool/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/desenstool/desensitize.py scan|run <输入> [--out ./desensitized --keys ./.desensitize_keys --mode hybrid|mask|token|redact --recursive --names 姓名清单.txt --cn-enhance]`
   - 或用 uv：`uv run --project ~/.workbuddy/skills/desensitization-sop/desenstool python …`
@@ -230,7 +261,7 @@
   - `scan`：仅扫描并报告命中（身份证/手机/银行卡/邮箱/IP/车牌/护照/代码密钥，开启 `--cn-enhance` 时含中文姓名/地址/机构名），不生成文件。
   - `run`：输出脱敏副本到 `--out`（默认 `./desensitized`，可上云）；加密映射表到 `--keys`（默认 `./.desensitize_keys`，含 `*.key` 密钥文件，权限 600，**不可与副本同传**）；并生成 `desensitize_report.json` 元数据（命中统计/恢复安全性/碰撞/skip）。
   - `restore`：用 `--keys` 映射表把 `--input`（默认 `./desensitized`）的脱敏副本**回填**为含原值的本地内部文档（`--out` 默认 `./restored`）；支持 `--types` 仅回填指定类型（如 `name,id_card`）。回填产物恢复为实名，仅限本地使用、勿随副本外传；token 模式请勿用于含同名串的数据。
-  - `audit`：基于 `run` 生成的 `desensitize_report.json` **自动产出 11 项审计文档**（`--out` 默认 `./desensitize_audit.md`），覆盖数据盘点/分级/脱敏方法/密钥分离/上云内容/复核结论/skip manifest/风险自评，省去手工填模板。
+  - `audit`：基于 `run` 生成的 `desensitize_report.json` **自动产出审计文档（九节，对齐 11 项自查清单）**（`--out` 默认 `./desensitize_audit.md`），覆盖数据盘点/分级/脱敏方法/密钥分离/上云内容/复核结论/skip manifest/风险自评，省去手工填模板。
   - `decrypt`：本地解密映射表供复核（`decrypt --keys ./.desensitize_keys [--out 明细.json]`），无需上云。
 - **脱敏模式（默认 `hybrid`）**：`mask`（掩码，可逆）/ `token`（令牌化，可逆且跨记录可关联）/ `hybrid`（语义掩码+唯一令牌，可逆、**无歧义恢复且保留字段语义**，SOP 主线默认）/ `redact`（抑制，不可逆）。
 - **`--cn-enhance`（中文识别增强，纯本地离线，无额外依赖）**：额外识别**中文姓名 / 中文地址 / 中文机构名**。

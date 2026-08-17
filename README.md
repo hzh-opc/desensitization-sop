@@ -36,7 +36,7 @@
 | 映射表安全 | 重识别钥匙（映射表）与副本**分离 + AES 加密 + 最小权限** |
 | 红线拦截 | 证券/投研内幕信息红线；财务/审计涉密禁传公共 AI；数值「去标识不扭曲」 |
 | 代码密钥扫描 | 账号/密码/API Key/Token/私钥自动扫描与脱敏确认 |
-| 任务后审计 | 自动生成 11 项审计汇总（追加至 `desensitize_audit.md`） |
+| 任务后审计 | 自动生成审计汇总（九节，对齐 11 项自查清单；追加至 `desensitize_audit.md`） |
 
 ---
 
@@ -51,7 +51,7 @@ python desenstool/desensitize.py run ./data/ \
     --out ./desensitized --keys ./.desensitize_keys --mode hybrid
 
 # 3) 上云：只把 ./desensitized 里的副本发给大模型；.desensitize_keys 永不外传
-# 4) 任务后审计（基于 run 报告自动生成 11 项审计文档）
+# 4) 任务后审计（基于 run 报告自动生成审计文档：九节，对齐 11 项自查清单）
 python desenstool/desensitize.py audit --report ./desensitize_report.json
 
 # 5) 本地复核 / 回填：用映射表解密或还原实名（均在本地，无需上云）
@@ -181,14 +181,14 @@ python3 uninstall.py --no-backup --yes       # 不备份直接删除（慎用）
 
 ## 能力边界与重要声明（必读）
 
-> **红线**：脱敏副本可上云，原始文件与映射表（重识别钥匙）留本地且分离；自动化识别非 100%，**禁止「一键脱敏即上云」，必须人工复核** skip manifest 中列出的未处理文件。
+> **红线**：脱敏副本可上云，原始文件与映射表（重识别钥匙）留本地且分离；**密码、加密原文件、已解密未脱敏副本、原始图片 / OCR 文本同样严禁外传**；自动化识别非 100%，**禁止「一键脱敏即上云」，必须人工复核**预处理关卡与 skip manifest 中列出的未处理文件。
 
 1. **自动化识别非 100% 召回（尤其中文姓名/住址）**，脱敏后必须人工复核。脚本内置离线中文增强（`--cn-enhance`），但仍可能漏报/误报（如「赵钱孙先生」可能误识为姓名、「北京大学」可能误识为机构）。
-2. **以下形态脚本不直接处理**，会在扫描/脱敏末尾输出 **skip manifest（未处理清单）并给出可执行提醒，绝不会静默放过**：
-   - 影像/图片（.png/.jpg/…）：脚本不做 OCR，须先本地 OCR 转文本；
-   - 纯图片型/扫描件 PDF（无文本层）：抽到空文本即提醒先本地 OCR；
-   - 加密文档（加密 PDF / 加密 Office）：提醒先本地解密后再纳入；
-   - 其他未知二进制：提醒转文本/OCR/解密后再纳入。
+2. **加密文档、图片 / 图片型 PDF 等"需前置处理"的形态，由 `preprocess`（本地预处理关卡，v2.4 起**实际解密 / OCR**）统一处理并汇入确认单，绝不会静默放过**：
+   - 影像/图片（.png/.jpg/…）：`preprocess` 用本地 **rapidocr + onnxruntime**（纯 pip 安装，模型随 wheel 捆绑，**完全离线**）识别为文本并落盘到 `ocr/`（**未脱敏、须校对**），确认单给出「不得外传」与校对提醒；OCR 库缺失时该项进入异常清单，由用户本地处理后发回；
+   - 纯图片型/扫描件 PDF（无文本层）：pypdfium2 抽到空文本即识别为 `image_pdf`，`preprocess` 同样走本地 rapidocr（pypdfium2 渲染页面后识别；不再误判为已覆盖）；
+   - 加密文档（加密 PDF / 加密 Office）：`preprocess` 用 **pikepdf / msoffcrypto-tool** 在**本地**解密，产出未加密副本到 `ready/`；缺密码/非标加密则进入异常清单，由用户本地处理后发回；
+   - 其他未知二进制 / 抽取异常：归为异常清单，须逐条人工处理，防止后续流程跳过。
 3. **可逆脱敏 ≠ 匿名化**：本 SOP 的本地映射表方案属于「去标识化」，在法律上**仍是个人信息**；映射表/密钥一旦与副本同泄，等于原始数据泄露，故必须分离、加密、最小权限。
 4. **本 SOP 为可落地操作规范，非法律意见**。具体合规要求请以 PIPL、数据安全法及主管部门最新规定为准。
 
@@ -206,7 +206,7 @@ A. 对绝大多数任务**基本无损**。标识符类脱敏（掩码/令牌）
 A. 不会。`desensitize.py` 纯本地运行，正则识别与 AES 加密均在本地；`--cn-enhance` 也是本地正则、无需下载模型。只有你**主动**把 `./desensitized/` 副本发给云端模型时数据才出本机，映射表永不离开本地。
 
 **Q4. 需要 Python 什么版本？**
-A. Python ≥ 3.9。脚本无 3.13 专属语法；推荐用 uv 管理依赖（`install.py` 会优先 `uv add`，无 uv 时回退 `venv`+`pip`）。
+A. 标准（非 free-threaded）CPython **≥ 3.10 且 < 3.14**（onnxruntime 无 free-threaded wheel、3.14 支持未完备；`desenstool/.python-version` 锁定 3.13）。推荐用 uv 管理依赖（`install.py` 会优先 `uv add`，无 uv 时回退 `venv`+`pip`）。
 
 **Q5. 脱敏后还能还原吗？用于生成工资单/申报表怎么办？**
 A. `hybrid`/`token`/`mask` 模式可逆：本地用 `decrypt` 查看映射表，或 `restore` 把脱敏副本**回填**为含原值的本地内部文档（用于工资单/申报表等需实名的交付物）。回填产物恢复为实名，仅限本地使用、勿随副本外传。`redact` 模式不可逆，不要用于需还原的数据。
@@ -214,8 +214,8 @@ A. `hybrid`/`token`/`mask` 模式可逆：本地用 `decrypt` 查看映射表，
 **Q6. 一键安装会从哪下载？离线能用吗？**
 A. 默认从 `https://github.com/hzh-opc/desensitization-sop` 下载（git clone 优先，失败降级 zip）。离线/内网环境用 `python3 install.py --source local --local-path /path/to/skill` 从已下载的技能目录安装。
 
-**Q7. 图片/加密 PDF 怎么办？**
-A. 脚本不处理图片、不破解加密、不做 OCR。它们会进入 skip manifest 并明确提醒你「先本地 OCR / 先本地解密」。处理完再重跑即可。
+**Q7. 图片 / 加密 PDF 怎么办？**
+A. v2.4 起 `preprocess` **自动处理**：加密文档用 pikepdf / msoffcrypto-tool 在**本地**解密（密码通过 `--passwords-file` 提供，该文件本身严禁外传），图片 / 图片型 PDF 用本地 **rapidocr + onnxruntime**（纯 pip 安装、模型随 wheel 捆绑、**完全离线**，无需任何外部服务）识别为文本并落盘到 `ocr/`（**未脱敏、须你逐字校对**）。`preprocess` 会生成**确认单**（`desensitize_preprocess_summary.md`）：① 列出原始文件与未脱敏副本的保存/外发情况（均🚫禁止外传）；② 列出 OCR 文件供你校对；③ 详细列出预处理异常；④ 你确认无误后，带 `--preprocess-manifest` 跑 `run` 才会放行（异常未清则拒绝）。
 
 **Q8. 支持哪些 AI 工具？**
 A. 技能本体兼容 WorkBuddy / OpenClaw / Claude Code / Codex（安装器会自动定位其 `skills/` 目录并写入常驻规则）。其他支持「技能目录 + 记忆文件」的 Agent 框架，可用 `--skills-dir` / `--memory-file` 覆盖路径。
@@ -234,10 +234,10 @@ A. 不会。`uninstall.py` 只删 `skills/desensitization-sop` 目录与记忆�
 |---|---|
 | 作者 / 维护者 | hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） |
 | 仓库 | https://github.com/hzh-opc/desensitization-sop |
-| 版本 | v2.3 · 2026-08-15 继 v2.2 三文件拆分后：① `--mode hybrid` 设为默认（语义掩码+唯一令牌，无歧义恢复且保留字段语义）；② 放宽数字类标识符边界（身份证/手机/银行卡/IP/车牌/护照可紧邻中文识别，如「手机138…」）；③ 修复代码密钥脱敏引号残留、redact 模式误报碰撞、自定义姓名 2 字整段打码等问题 |
+| 版本 | v2.4 · 2026-08-17 ① 新增 `preprocess` 本地预处理关卡：自动解密加密文档（pikepdf / msoffcrypto-tool）+ 纯本地 OCR（rapidocr + onnxruntime，模型随 wheel 捆绑、完全离线），产出确认单（保存/外发清单、OCR 校对提醒、异常清单、run 闸门）；② PDF 文本抽取由 pdfminer.six 换成 **pypdfium2**（与 OCR 渲染共用一库）；③ Python 版本明确为标准 CPython ≥3.10 且 <3.14；④ 全量回归测试通过（详见 `CHANGELOG.md`） |
 | 原始思路 | 《脱敏资料的处理与生成台》 |
 | 许可 | 见仓库根目录 [`LICENSE`](LICENSE)（本项目采用 **Apache License 2.0**，可自由使用、修改、分发；商用须保留版权与许可声明、标注修改、附 NOTICE）；**所引用的国家标准、行业标准以主管部门官方发布文本为准** |
-| 文件结构 | `SKILL.md`：自动加载的执行规范；`reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`：跨平台一键安装/卸载；`desenstool/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pdfminer.six`），数据不出本机 |
+| 文件结构 | `SKILL.md`：自动加载的执行规范；`reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`：跨平台一键安装/卸载；`desenstool/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`），数据不出本机 |
 
 ---
 

@@ -259,7 +259,7 @@ def _write_minimal_pyproject(desenstool: Path):
         'name = "desensitization-tool"\n'
         'version = "0.1.0"\n'
         'description = "信息脱敏上云 SOP 本地脱敏工具"\n'
-        'requires-python = ">=3.9"\n'
+        'requires-python = ">=3.10,<3.14"\n'
         'dependencies = []\n'
         '\n'
         '[tool.uv]\n'
@@ -298,7 +298,12 @@ def ensure_venv(skill_dir: Path, skip=False):
 
     # 2) 优先用 uv add 安装依赖（无需 venv 自带 pip）
     if uv:
-        deps = ["cryptography", "python-docx", "openpyxl", "python-pptx", "pdfminer.six"]
+        # 与 requirements.txt / desenstool/pyproject.toml 保持一致：
+        # 基础抽取/解密库 + v2.4 起纯本地 OCR（rapidocr + onnxruntime + pypdfium2，
+        # 模型随 wheel 捆绑、完全离线）。
+        deps = ["cryptography", "python-docx", "openpyxl", "python-pptx",
+                "pypdfium2", "pikepdf", "msoffcrypto-tool",
+                "rapidocr", "onnxruntime"]
         log("使用 uv 安装依赖（uv add，可能需联网，请稍候）……")
         env = dict(os.environ)
         r = subprocess.run([uv, "add"] + deps, cwd=str(desenstool),
@@ -357,7 +362,8 @@ def ensure_venv(skill_dir: Path, skip=False):
     if r.returncode != 0:
         log("依赖安装失败：%s" % (r.stderr.strip() or r.stdout.strip()), "FAIL")
         log("提示：脚本基础模式（文本/代码）仅需 cryptography；"
-            "Office/PDF 抽取需 python-docx/openpyxl/python-pptx/pdfminer.six。", "WARN")
+            "Office 抽取需 python-docx/openpyxl/python-pptx，PDF 抽取/渲染需 pypdfium2，"
+            "本地 OCR 需 rapidocr + onnxruntime。", "WARN")
         return None
     log("依赖安装完成。", "OK")
     return py

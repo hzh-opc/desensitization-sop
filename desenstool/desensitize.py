@@ -16,7 +16,15 @@
 
 依赖：
 - 必需：cryptography（AES / Fernet）
+- 解密：pikepdf（封装 QPDF，稳健解密 PDF）、msoffcrypto-tool（解密 Office）
+- PDF 文本抽取 / 页面渲染：pypdfium2（Chrome 同款 PDFium，C 实现，快且稳健）
+- 本地 OCR：rapidocr + onnxruntime（纯 pip 安装，模型随 wheel 捆绑，
+  完全离线、数据不出本机；中文识别基于 PP-OCRv6 模型）
 - 中文增强：纯内置正则，无额外依赖（不依赖 Presidio 等需联网下载模型的方案）
+
+Python 版本：标准（非 free-threaded）CPython >=3.10 且 <3.14——
+onnxruntime 目前不提供 free-threaded wheel，3.14 支持亦未完备，
+故 Python 版本按全部依赖的兼容性综合确定。
 
 用法：
   # 扫描（仅报告命中，不生成文件）
@@ -53,6 +61,14 @@
   # 审计：基于 run 报告自动生成 11 项审计文档
   uv run --project <tool_dir> python desensitize.py audit \
       --report ./desensitize_report.json --out ./desensitize_audit.md
+
+  # 本地预处理（v2.4 起自动解密 + 纯本地 rapidocr OCR）
+  uv run --project <tool_dir> python desensitize.py preprocess ./data/ \
+      --passwords-file ./pw.txt --out-dir ./preprocessed
+  # 确认无误并校对 OCR 后，run 会再次校验无异常才放行
+  uv run --project <tool_dir> python desensitize.py run ./preprocessed \
+      --preprocess-manifest ./preprocessed/desensitize_preprocess.json \
+      --out ./desensitized --mode hybrid
 """
 
 import argparse
@@ -61,6 +77,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 from datetime import datetime
 
@@ -189,14 +206,52 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff",
               ".webp", ".heic", ".heif"}
 # skip manifest 的明确可执行提醒（让用户知道“为什么没处理、下一步做什么”）
 REMIND = {
-    "encrypted": "加密文档：脚本无法处理加密文件，请先在本地解密后再纳入脱敏（解密后重跑本命令）",
-    "image_only": "纯图片型/扫描件 PDF：pdfminer 仅能提取文本层，本文件未提取到任何文本，"
-                  "请先在本地用 OCR 将图片转为文本（.txt/.md）后再纳入脱敏",
+    "encrypted": "加密文档：脚本无法处理加密文件，请先运行 preprocess 自动解密"
+                 "（提供 --passwords-file），或本地手动解密后再纳入脱敏",
+    "image_only": "纯图片型/扫描件 PDF：本文件无文本层，请先运行 preprocess"
+                  "（内置 rapidocr 本地 OCR，完全离线）识别为文本后再纳入脱敏",
     "empty": "文档未提取到文本（可能为图片型扫描件或空文档）：若含敏感信息，"
-             "请先 OCR 转文本后再纳入脱敏",
+             "请先运行 preprocess 做 OCR 后再纳入脱敏",
     "error": "文档读取/抽取失败（可能已加密或文件损坏）：请先解密或确认文件完整性后再纳入脱敏",
     "no_lib": "缺少抽取库，无法处理该二进制文档：请安装对应库（docx→python-docx，"
-              "xlsx→openpyxl，pptx→python-pptx，pdf→pdfminer.six）后再处理",
+              "xlsx→openpyxl，pptx→python-pptx，pdf→pypdfium2）后再处理",
+}
+
+# “不得外传”红线警告（按类别显式给出，杜绝后续流程把原文件/未脱敏副本送出去）
+# 说明：以下三类严禁离本地，是本地预处理关卡的核心约束，会被 preprocess / run / audit 反复提示。
+WARN_ENCRYPTED = ("⚠️ 严禁外传：解密密码、加密原文件、以及“已解密但未脱敏”的副本——"
+                  "三者均不得发送至任何外部/云端。仅在本地完成解密，再用本工具脱敏后，"
+                  "方可上云脱敏副本。")
+WARN_IMAGE = ("⚠️ 严禁外传：原始图片/图片型PDF，以及 OCR 识别出、未经脱敏的文本——"
+              "二者均不得发送至任何外部/云端。仅在本地完成 OCR 与脱敏后，"
+              "方可上云脱敏副本。")
+WARN_GENERIC = ("⚠️ 该文件未经处理，上云前须先本地转为文本/OCR/解密或确认不含敏感信息；"
+                "原始文件与未脱敏文件均不得直接外传。")
+
+# 预处理/脱敏流程自身产出的元数据文件（不含业务敏感信息，run 时须跳过、不可当作业务文本脱敏）
+META_SKIP = {
+    "desensitize_preprocess.json",
+    "desensitize_preprocess_summary.md",
+    "desensitize_report.json",
+    "desensitize_audit.md",
+}
+
+# 本地 OCR：rapidocr（纯 pip 安装，模型随 wheel 捆绑，完全离线、数据不出本机）。
+# 引擎按需惰性初始化（首次加载模型约数秒，之后常驻复用）。
+OCR_NOTE = ("本地 OCR 使用 rapidocr + onnxruntime（纯 pip、模型内置、完全离线）。"
+            "若导入失败，请在本环境安装：uv add rapidocr onnxruntime pypdfium2"
+            "（或 pip install rapidocr onnxruntime pypdfium2）。")
+
+# 预处理分类 → 动作/警告 映射（供 preprocess 与 skip 复用）
+PREPROCESS_ACTIONS = {
+    "treatable":   ("无需预处理", None),
+    "encrypted":   ("本地解密（用户提供密码，仅本地操作）", WARN_ENCRYPTED),
+    "image":       ("本地 rapidocr 识别为文本并落盘，提醒用户校对", WARN_IMAGE),
+    "image_pdf":   ("本地 rapidocr 识别为文本并落盘，提醒用户校对", WARN_IMAGE),
+    "no_lib":      ("安装缺失的抽取库后重跑", WARN_GENERIC),
+    "error":       ("人工复核：解密/确认完整性或转文本", WARN_GENERIC),
+    "empty":       ("人工确认是否含敏感信息（空文档/图片型）", WARN_GENERIC),
+    "unsupported": ("本地转为文本，或 OCR/解密后纳入", WARN_GENERIC),
 }
 
 # ---------------------------------------------------------------------------
@@ -338,6 +393,9 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
                  patterns=None, skipped=None):
     """处理单个文件。skipped 为可选 list，用于收集“未处理文件”（skip manifest）。"""
     try:
+        # 跳过流程自身产出的元数据文件，避免把清单/报告当作业务文本脱敏
+        if os.path.basename(path) in META_SKIP:
+            return "skip_meta"
         ext = os.path.splitext(path)[1].lower()
         # 二进制/库文件：抽取文本后再脱敏（库缺失则跳过并告警）
         if ext in EXTRACT_EXTS:
@@ -348,20 +406,20 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
         if ext not in (TEXT_EXTS | CODE_EXTS):
             if skipped is not None:
                 if ext in IMAGE_EXTS:
-                    skipped.append((path,
-                        "影像/图片文件（%s）：本脚本不做 OCR，请先在本地用 OCR 将图片转为文本"
-                        "（.txt/.md）后再纳入脱敏；原始图片不会被处理" % ext))
+                    _skip(skipped, path, src_root, "image",
+                          "影像/图片文件（%s）：scan/run 不直接做 OCR，请先运行 preprocess"
+                          "（内置 rapidocr 本地 OCR，完全离线）识别为文本后再纳入脱敏；"
+                          "原始图片不会被处理" % ext)
                 else:
-                    skipped.append((path,
-                        "未支持的信息源类型（%s）：二进制/未知格式，若含敏感文本请先转为"
-                        "文本文件（或 OCR/解密）后再纳入脱敏" % ext))
+                    _skip(skipped, path, src_root, "unsupported",
+                          "未支持的信息源类型（%s）：二进制/未知格式，若含敏感文本请先转为"
+                          "文本文件（或 OCR/解密）后再纳入脱敏" % ext)
             return "skipped"
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
     except Exception as e:
         print("  [跳过] 无法读取 %s: %s" % (path, e), file=sys.stderr)
-        if skipped is not None:
-            skipped.append((path, "读取失败: %s" % e))
+        _skip(skipped, path, src_root, "error", "读取失败: %s" % e)
         return "error"
 
     ext = os.path.splitext(path)[1].lower()
@@ -417,7 +475,7 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
 # ---------------------------------------------------------------------------
 def _lib_for(ext):
     return {".docx": "python-docx", ".xlsx": "openpyxl",
-            ".pptx": "python-pptx", ".pdf": "pdfminer.six"}.get(ext, "未知库")
+            ".pptx": "python-pptx", ".pdf": "pypdfium2"}.get(ext, "未知库")
 
 
 def _extract_sqlite(path):
@@ -481,8 +539,16 @@ def _extract_text(ext, path):
                                 lines.append(t)
             text = "\n".join(lines)
         elif ext == ".pdf":
-            from pdfminer.high_level import extract_text as _pdf_text
-            text = _pdf_text(path) or ""
+            # pypdfium2（Chrome 同款 PDFium，C 实现）：快且对畸形 PDF 更稳健；
+            # 加密 PDF 抛 PdfiumError → 由下方异常分支归类 encrypted
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(path)
+            try:
+                text = "\n".join(
+                    doc[i].get_textpage().get_text_range()
+                    for i in range(len(doc)))
+            finally:
+                doc.close()
         elif ext == ".db":
             text = _extract_sqlite(path)
         else:
@@ -494,13 +560,13 @@ def _extract_text(ext, path):
         if any(k in msg for k in ("password", "encrypt", "decrypt", "protected",
                                   "not a database")):
             return (None, None, "encrypted")
-        # pdfminer 对真加密 PDF 常抛 PDFPasswordIncorrect（消息可能为空）；
+        # pypdfium2 对真加密 PDF 抛 PdfiumError（消息可能不含关键字）；
         # 此时用 /Encrypt 标记二次确认，避免与“文件损坏”混淆
         if ext == ".pdf" and _pdf_has_encrypt(path):
             return (None, None, "encrypted")
         return (None, None, "error")
     # 抽到文本但为空：可能是纯图片型扫描件，也可能是加密 PDF
-    # （pdfminer 对加密 PDF 常返回空而不报错，故额外探测 /Encrypt 标记）
+    # （个别加密 PDF 可开但无文本层，故额外探测 /Encrypt 标记）
     if not text or not text.strip():
         if ext == ".pdf" and _pdf_has_encrypt(path):
             return (None, None, "encrypted")
@@ -509,11 +575,21 @@ def _extract_text(ext, path):
 
 
 def _pdf_has_encrypt(path):
-    """探测 PDF 是否含 /Encrypt 字典（粗略但高效，仅读前若干字节）。"""
+    """探测 PDF 是否含 /Encrypt 字典（粗略但高效）。
+
+    /Encrypt 引用通常位于文件**尾部**的 trailer，但也可能出现在前部对象中，
+    故头、尾各读一段（各至多 5MB），避免大文件只读头部造成漏判。"""
     try:
+        size = os.path.getsize(path)
+        chunk = 5 * 1024 * 1024
         with open(path, "rb") as fb:
-            head = fb.read(5 * 1024 * 1024)  # 至多 5MB，足够覆盖绝大多数文档
-        return b"/Encrypt" in head
+            head = fb.read(chunk)
+            if b"/Encrypt" in head:
+                return True
+            if size > chunk:
+                fb.seek(max(0, size - chunk))
+                return b"/Encrypt" in fb.read()
+        return False
     except Exception:
         return False
 
@@ -525,14 +601,15 @@ def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
     text, missing, reason = _extract_text(ext, path)
     if text is None:
         if missing:
-            msg = ("缺少抽取库 %s，无法处理该二进制文档：请安装对应库"
+            cat, reason = "no_lib", ("缺少抽取库 %s，无法处理该二进制文档：请安装对应库"
                    "（docx→python-docx，xlsx→openpyxl，pptx→python-pptx，"
-                   "pdf→pdfminer.six）后再处理" % missing)
+                   "pdf→pypdfium2）后再处理" % missing)
         else:
-            msg = REMIND.get(reason, "文本抽取失败（请确认文件未加密且未损坏）")
-        if skipped is not None:
-            skipped.append((path, msg))
-        print("  [跳过] %s：%s" % (rel_path, msg), file=sys.stderr)
+            cat = {"encrypted": "encrypted", "image_only": "image_pdf",
+                   "empty": "empty", "error": "error"}.get(reason, "error")
+            reason = REMIND.get(reason, "文本抽取失败（请确认文件未加密且未损坏）")
+        _skip(skipped, path, src_root, cat, reason)
+        print("  [跳过] %s：%s" % (rel_path, reason), file=sys.stderr)
         return "skipped"
     if not do_write:
         c = scan_text(text, names, patterns)
@@ -617,13 +694,25 @@ def find_collisions(mapping: dict):
 
 
 def _report_skipped(skipped, src_root):
-    """打印“未处理文件清单”（skip manifest），杜绝目录扫描的静默漏扫。"""
+    """打印“未处理文件清单”（skip manifest），杜绝目录扫描的静默漏扫。
+    兼容旧式 (path, reason) 元组与新式 dict 两种结构。"""
     if not skipped:
         return
     print("\n[警告] 以下 %d 个文件未被处理（可能含敏感信息，上云前须先转文本/OCR/"
           "安装抽取库，或人工复核）：" % len(skipped), file=sys.stderr)
-    for p, reason in skipped:
-        print("    - %s  （%s）" % (os.path.relpath(p, src_root), reason), file=sys.stderr)
+    for it in skipped:
+        if isinstance(it, dict):
+            rel = it.get("rel") or os.path.relpath(it.get("path", ""), src_root)
+            reason = it.get("reason", "")
+            warn = it.get("warning")
+            line = "    - %s  （%s）" % (rel, reason)
+            print(line, file=sys.stderr)
+            if warn:
+                print("        %s" % warn, file=sys.stderr)
+        else:
+            p, reason = it
+            print("    - %s  （%s）" % (os.path.relpath(p, src_root), reason),
+                  file=sys.stderr)
 
 
 def report_collisions(collisions: dict, mode: str):
@@ -652,8 +741,9 @@ def iter_targets(input_path: str, recursive: bool):
         yield input_path
         return
     if recursive:
-        for root, _, files in os.walk(input_path):
-            for fn in files:
+        for root, dirs, files in os.walk(input_path):
+            dirs.sort()  # 排序保证跨平台遍历顺序确定（token 编号可复现）
+            for fn in sorted(files):
                 yield os.path.join(root, fn)
     else:
         for fn in sorted(os.listdir(input_path)):
@@ -671,6 +761,537 @@ def load_names(path: str):
     except FileNotFoundError:
         print("  [警告] 姓名清单文件不存在：%s（已忽略）" % path, file=sys.stderr)
         return set()
+
+
+def _skip(skipped, path, src_root, category, reason, action=None, warning=None):
+    """向 skipped 列表追加结构化未处理项（dict）。skipped 为 None 时跳过。
+    分类与动作/警告来自 PREPROCESS_ACTIONS，允许调用处显式覆盖。"""
+    if skipped is None:
+        return
+    act, warn = PREPROCESS_ACTIONS.get(category, (action, warning))
+    if action is not None:
+        act = action
+    if warning is not None:
+        warn = warning
+    skipped.append({
+        "path": path,
+        "rel": os.path.relpath(path, src_root),
+        "category": category,
+        "reason": reason,
+        "action": act,
+        "warning": warn,
+    })
+
+
+def _mk_skip(path, src_root, category, reason):
+    """构造结构化未处理项（与 _skip 输出同构）。"""
+    act, warn = PREPROCESS_ACTIONS.get(category, (None, None))
+    return {
+        "path": path,
+        "rel": os.path.relpath(path, src_root),
+        "category": category,
+        "reason": reason,
+        "action": act,
+        "warning": warn,
+    }
+
+
+def _classify_file(path, src_root):
+    """本地预处理分类：返回 dict（与 _skip 同构）或 None（treatable，无需预处理）。
+    仅做轻量探测（图片不抽取；PDF 探测 /Encrypt + 试抽取；Office/db 试抽取），
+    用于生成统一的“预处理清单”，不实际脱敏。"""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (TEXT_EXTS | CODE_EXTS):
+        return None
+    if ext in IMAGE_EXTS:
+        return _mk_skip(path, src_root, "image",
+                        "图片文件（无文本层，脚本不做 OCR）")
+    if ext in EXTRACT_EXTS:
+        if ext == ".pdf" and _pdf_has_encrypt(path):
+            return _mk_skip(path, src_root, "encrypted",
+                            "加密 PDF（含 /Encrypt 标记）")
+        text, missing, reason = _extract_text(ext, path)
+        if missing:
+            return _mk_skip(path, src_root, "no_lib",
+                            "缺少抽取库 %s" % missing)
+        if text is None:
+            if reason == "encrypted":
+                return _mk_skip(path, src_root, "encrypted",
+                                "加密文档（抽取异常/含保护）")
+            if reason == "image_only":
+                return _mk_skip(path, src_root, "image_pdf",
+                                "纯图片型/扫描件 PDF（无文本层）")
+            return _mk_skip(path, src_root, "error",
+                            "抽取失败（%s）；可能已加密或文件损坏" % reason)
+        if not text.strip():
+            return _mk_skip(path, src_root, "empty",
+                            "文档未提取到文本（可能为空或图片型）")
+        return None  # 抽取成功，可直接脱敏
+    return _mk_skip(path, src_root, "unsupported",
+                    "未知/二进制格式（%s），若含敏感文本需先转文本" % ext)
+
+
+# ---------------------------------------------------------------------------
+# 本地预处理：自动解密（pikepdf / msoffcrypto-tool）+ 自动 OCR（rapidocr，纯本地离线）
+# ---------------------------------------------------------------------------
+def _decrypt_pdf(path, password, out_path):
+    """用 pikepdf（封装 QPDF，C 实现、稳健）解密 PDF 并写出未脱敏的解密副本。
+    返回 True=成功 / False=密码错误或解密失败 / None=缺少 pikepdf 库。
+    pikepdf 保存时不设加密，故产出为未加密 PDF，可继续被分类/抽取/OCR 处理。"""
+    try:
+        import pikepdf
+    except ImportError:
+        return None
+    try:
+        with pikepdf.open(path, password=password) as src:
+            src.save(out_path)
+        return True
+    except Exception:
+        return False
+
+
+def _decrypt_office(path, password, out_path):
+    """用 msoffcrypto-tool 尝试解密 Office 文档并写出未脱敏副本。
+    返回 True=成功 / False=失败 / None=缺少 msoffcrypto-tool 库。"""
+    try:
+        import msoffcrypto
+    except ImportError:
+        return None
+    try:
+        with open(path, "rb") as f:
+            of = msoffcrypto.OfficeFile(f)
+            of.load_key(password=password)
+            with open(out_path, "wb") as o:
+                of.decrypt(o)
+        return True
+    except Exception:
+        return False
+
+
+def _try_decrypt(path, passwords, out_path):
+    """依次尝试候选密码解密；返回 (out_path, None) 或 (None, err)。"""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        dec, lib = _decrypt_pdf, "pikepdf"
+    elif ext in (".docx", ".xlsx", ".pptx"):
+        dec, lib = _decrypt_office, "msoffcrypto-tool"
+    else:
+        return None, "不支持自动解密的格式：%s（请手动解密后纳入）" % ext
+    if not passwords:
+        return None, "未提供候选密码（--passwords-file）"
+    for pw in passwords:
+        r = dec(path, pw, out_path)
+        if r is True:
+            return out_path, None
+        if r is None:
+            return None, ("缺少解密库 %s，无法自动解密：请在本环境安装后重跑"
+                          "（uv add %s 或 pip install %s）" % (lib, lib, lib))
+    return None, "所有候选密码均解密失败（密码错误或文件非标准加密）"
+
+
+# ---------------------------------------------------------------------------
+# 本地 OCR：rapidocr（纯 pip，模型随 wheel 捆绑，完全离线）
+# ---------------------------------------------------------------------------
+_OCR_ENGINES = {}
+_OCR_ENGINE_ERR = None
+
+# OCR 图像归一化与 det limit_side_len 自适应（精度优先，均经实测标定）：
+# - 实测默认 limit=736 会把整页扫描件（~2100px）压缩到文字 ~15px → 识别碎片化；
+#   而 ~2500px+ 区间 det 模型亦不稳定（实测 2527px 碎片化）；1000–2100px 为稳定区。
+# - 故统一把图像归一化到最长边 ≤ _OCR_TARGET_PX（LANCZOS 降采样），
+#   limit_side_len = clamp(最长边, 736, 2000)：不缩放为最佳，小图下限 736 略放大助识别。
+_OCR_TARGET_PX = 2000
+_OCR_LIMIT_MIN = 736
+_OCR_LIMIT_MAX = 2000
+
+
+def _ocr_limit_for(w, h):
+    return min(max(max(w, h), _OCR_LIMIT_MIN), _OCR_LIMIT_MAX)
+
+
+def _normalize_for_ocr(pil_img):
+    """最长边超过目标像素则 LANCZOS 降采样到目标（避开 det 不稳定区间）。"""
+    from PIL import Image
+    w, h = pil_img.size
+    m = max(w, h)
+    if m > _OCR_TARGET_PX:
+        r = _OCR_TARGET_PX / m
+        pil_img = pil_img.resize((max(1, int(w * r)), max(1, int(h * r))),
+                                 Image.LANCZOS)
+    return pil_img
+
+
+def _get_ocr_engine(limit_side_len):
+    """按 limit_side_len 惰性初始化 rapidocr 引擎（进程内按配置缓存复用）。
+    返回 (engine, None) 或 (None, err)。首次加载模型需数秒，之后极快。"""
+    global _OCR_ENGINE_ERR
+    if limit_side_len in _OCR_ENGINES:
+        return _OCR_ENGINES[limit_side_len], None
+    if _OCR_ENGINE_ERR is not None:
+        return None, _OCR_ENGINE_ERR
+    try:
+        from rapidocr import RapidOCR
+        engine = RapidOCR(params={"Det.limit_side_len": int(limit_side_len)})
+        _OCR_ENGINES[limit_side_len] = engine
+        return engine, None
+    except ImportError:
+        _OCR_ENGINE_ERR = "未安装 rapidocr/onnxruntime：" + OCR_NOTE
+    except Exception as e:
+        _OCR_ENGINE_ERR = "rapidocr 初始化失败：%s" % e
+    return None, _OCR_ENGINE_ERR
+
+
+def _ocr_result_texts(res):
+    """从 rapidocr 返回结果中提取全部文本行（兼容 v3 结果对象与旧列表格式；
+    未检测到文本时 txts 为 None，须按空处理）。"""
+    if res is None:
+        return []
+    txts = getattr(res, "txts", None)
+    if txts is not None:
+        return [str(t) for t in txts if t and str(t).strip()]
+    # 兼容 [[box, text, score], ...] 旧格式
+    out = []
+    try:
+        for item in res:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and item[1]:
+                out.append(str(item[1]))
+    except TypeError:
+        pass
+    return out
+
+
+def _ocr_one_image(pil_img):
+    """识别单张 PIL 图片（先归一化到稳定像素区）；返回 (text, None) 或 (None, err)。"""
+    pil_img = _normalize_for_ocr(pil_img)
+    engine, err = _get_ocr_engine(_ocr_limit_for(*pil_img.size))
+    if engine is None:
+        return None, err
+    try:
+        res = engine(pil_img)
+    except Exception as e:
+        return None, "rapidocr 识别失败：%s" % e
+    return "\n".join(_ocr_result_texts(res)), None
+
+
+def _ocr_image(path):
+    """rapidocr 识别单张图片文件；返回 (text, None) 或 (None, err)。完全离线。"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, "未安装 Pillow（rapidocr 依赖链应自带）"
+    try:
+        with Image.open(path) as im:
+            return _ocr_one_image(im.convert("RGB"))
+    except Exception as e:
+        return None, "图片读取失败：%s" % e
+
+
+def _ocr_pdf(path):
+    """图片型 PDF：pypdfium2 逐页渲染为图像 → rapidocr 逐页识别。
+    返回 (text, None) 或 (None, err)。完全离线。"""
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return None, "未安装 pypdfium2（PDF 页面渲染必需）"
+    texts = []
+    try:
+        doc = pdfium.PdfDocument(path)
+        try:
+            for i in range(len(doc)):
+                page = doc[i]
+                # 自适应渲染：让最长边≈目标像素（小页超采样提精度，大页控耗时），
+                # 再由 _ocr_one_image 归一化兜底，避开 det 不稳定区间
+                w_pt, h_pt = page.get_size()
+                scale = _OCR_TARGET_PX / max(w_pt, h_pt) if max(w_pt, h_pt) else 2.0
+                scale = min(max(scale, 1.0), 4.0)
+                with page.render(scale=scale).to_pil() as pil_img:
+                    text, err = _ocr_one_image(pil_img.convert("RGB"))
+                if err is not None:
+                    return None, err
+                if text:
+                    texts.append(text)
+        finally:
+            doc.close()
+    except Exception as e:
+        return None, "PDF 渲染/OCR 失败：%s" % e
+    return "\n".join(texts), None
+
+
+def _ocr_file(path):
+    """按类型分流 OCR：PDF → 渲染后识别；图片 → 直接识别。"""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return _ocr_pdf(path)
+    return _ocr_image(path)
+
+
+def _load_passwords(path):
+    """读取候选密码文件：每行一个；或 JSON 列表 / {文件名: 密码} 字典。
+    该密码文件本身含敏感信息，严禁外传。
+    文件不存在/不可读时不崩溃：打印警告并按"无候选密码"处理。"""
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+    except OSError as e:
+        print("  [警告] 密码文件读取失败（%s）：%s（按无候选密码处理）"
+              % (path, e), file=sys.stderr)
+        return []
+    if not raw:
+        return []
+    if raw[0] in "[{":
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, list):
+                return [str(x) for x in obj]
+            if isinstance(obj, dict):
+                return [str(v) for v in obj.values()]
+        except Exception:
+            pass
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+
+def _write_preprocess_summary(path, items, exceptions, out_dir, manifest_path,
+                              ready_list=None):
+    """写出“本地预处理确认单”（满足：原文件/未脱敏副本保存外发清单、
+    OCR 校对提醒、异常清单、确认后再 run 的闸门）。"""
+    L = []
+    L.append("# 本地预处理确认单（脱敏前必读 · 防割裂）\n")
+    L.append("> **红线**：下方所有「原始文件」与「未脱敏副本（解密副本 / OCR 文本 / 直接可脱敏副本）」"
+             "均 **本地留存、严禁外传**。\n"
+             "> 仅当确认无误并完成脱敏后，脱敏副本方可上云。\n")
+    # 一、保存 / 外发情况
+    L.append("## 一、原始文件与未脱敏副本 · 保存 / 外发情况\n")
+    L.append("| 原始文件 | 未脱敏副本（预处理产出） | 类型 | 保存位置 | 外发状态 |")
+    L.append("| --- | --- | --- | --- | --- |")
+
+    def _md(s):
+        return str(s).replace("|", "\\|")
+
+    for it in items:
+        orig = it["original"]
+        if it.get("preprocessed_copy"):
+            copy = it["preprocessed_copy"]
+        elif it.get("status") == "exception":
+            copy = "（未产出，见异常清单）"
+        else:
+            copy = "（无需副本）"
+        typ = it.get("preprocessed") or it["category"]
+        L.append("| `%s` | `%s` | %s | 本地 | 🚫 禁止 |"
+                 % (_md(orig), _md(copy), _md(typ)))
+    for orig, copy in (ready_list or []):
+        L.append("| `%s` | `%s` | ready（直接可脱敏·未脱敏副本） | 本地 | 🚫 禁止 |"
+                 % (_md(orig), _md(copy)))
+    L.append("")
+    if any(it.get("preprocessed") == "decrypted+ocr" for it in items):
+        L.append("> 说明：「decrypted+ocr」项的解密副本（ready/ 下的 PDF）无文本层，"
+                 "其内容已由 ocr/ 下的 OCR 文本覆盖；后续 run 跳过该 PDF 属**正常现象**，"
+                 "并非漏处理。\n")
+    # 二、OCR 校对
+    ocr_items = [it for it in items if it.get("needs_proofread")]
+    L.append("## 二、OCR 结果 · 需用户逐项校对\n")
+    if ocr_items:
+        for it in ocr_items:
+            L.append("- 校对文件 `%s`（对应原始 `%s`）：请逐字核对识别文本，"
+                     "重点关注姓名 / 证件号 / 银行卡 / 金额等敏感字段；"
+                     "确认无误后再脱敏。" % (it["preprocessed_copy"], it["original"]))
+    else:
+        L.append("- 本次无 OCR 产出，无需校对。")
+    L.append("")
+    # 三、异常清单
+    L.append("## 三、预处理异常清单（须另行处理后发回 AI Agent）\n")
+    L.append("| 文件 | 类别 | 异常原因 | 处理建议 |")
+    L.append("| --- | --- | --- | --- |")
+    if exceptions:
+        for ex in exceptions:
+            act = ex.get("action") or ("本地处理（解密 / 安装抽取库 / OCR / 转文本）后，"
+                                       "将结果发回 AI Agent 重新纳入")
+            L.append("| `%s` | %s | %s | %s |"
+                     % (_md(ex["original"]), _md(ex["category"]),
+                        _md(ex["exception"]), _md(act)))
+    else:
+        L.append("| —— | —— | 无异常 | —— |")
+    L.append("")
+    L.append("> 异常未处理前 **禁止** 执行 `run`；请用户本地处理后将结果交回 AI Agent。\n")
+    # 四、确认与继续
+    L.append("## 四、确认与继续\n")
+    L.append("1. 确认：① 异常清单已全部处理；② OCR 文本已逐项校对无误。")
+    L.append("2. 确认无误后执行（脚本会再次校验无异常才放行）：")
+    L.append("   ```")
+    L.append("   python desensitize.py run %s --preprocess-manifest %s --out <脱敏输出目录> --mode hybrid"
+             % (out_dir, manifest_path))
+    L.append("   ```")
+    L.append("")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L))
+
+
+def cmd_preprocess(args):
+    """本地预处理关卡（v2.4 起实际执行解密 / OCR——纯本地 rapidocr，
+    模型内置、完全离线，无需任何外部服务）。
+
+    流程：分类 → 自动解密（加密文档）/ 自动 OCR（图片、图片型 PDF）→ 产出
+    “预处理确认单”（含原文件与未脱敏副本的保存/外发情况、OCR 校对提醒、异常清单），
+    并在确认单中设置“经用户确认与校对无异常后再 run”的闸门。"""
+    input_path = os.path.abspath(args.input)
+    src_root = input_path if os.path.isdir(input_path) else os.path.dirname(input_path)
+    out_dir = os.path.abspath(args.out_dir)
+    if not args.manifest:
+        args.manifest = os.path.join(out_dir, "desensitize_preprocess.json")
+    ready_dir = os.path.join(out_dir, "ready")
+    ocr_dir = os.path.join(out_dir, "ocr")
+    os.makedirs(ready_dir, exist_ok=True)
+    os.makedirs(ocr_dir, exist_ok=True)
+
+    passwords = _load_passwords(args.passwords_file)
+
+    items, exceptions, treated_ready = [], [], []
+    for p in iter_targets(input_path, args.recursive):
+        c = _classify_file(p, src_root)
+        if c is None:
+            treated_ready.append(p)  # 直接可脱敏，拷入 ready（未脱敏副本）
+            continue
+        cat = c["category"]
+        item = {
+            "original": os.path.abspath(p),
+            "rel": c["rel"],
+            "category": cat,
+            "external_send": "forbidden",
+            "original_retained": True,
+            "status": "done",
+        }
+        if cat == "encrypted":
+            if args.no_auto:
+                item["status"] = "needs_action"
+                item["action"] = "本地解密（用户提供密码，仅本地操作）"
+                item["warning"] = WARN_ENCRYPTED
+                items.append(item)
+                continue
+            # 按相对路径保留目录结构，避免递归时不同子目录同名文件互相覆盖
+            dec_path = os.path.join(ready_dir, c["rel"])
+            os.makedirs(os.path.dirname(dec_path) or ready_dir, exist_ok=True)
+            res, err = _try_decrypt(p, passwords, dec_path)
+            if res is None:
+                item["status"] = "exception"
+                item["exception"] = err
+                exceptions.append(item)
+                items.append(item)
+                continue
+            item["preprocessed"] = "decrypted"
+            item["preprocessed_copy"] = os.path.abspath(dec_path)
+            item["warning"] = WARN_ENCRYPTED
+            # 解密后可能仍是图片型（无文本层）→ 继续 OCR（本地 rapidocr，离线）
+            c2 = _classify_file(dec_path, src_root)
+            if c2 and c2["category"] in ("image_pdf", "image"):
+                txt_path = os.path.join(ocr_dir, c["rel"] + ".ocr.txt")
+                os.makedirs(os.path.dirname(txt_path) or ocr_dir, exist_ok=True)
+                text, oerr = _ocr_file(dec_path)
+                if text is not None:
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    item["preprocessed"] = "decrypted+ocr"
+                    item["preprocessed_copy"] = os.path.abspath(txt_path)
+                    item["needs_proofread"] = True
+                else:
+                    item["status"] = "exception"
+                    item["exception"] = "解密成功但 OCR 失败：%s" % oerr
+                    exceptions.append(item)
+                    items.append(item)
+                    continue
+            items.append(item)
+            continue
+        if cat in ("image", "image_pdf"):
+            if args.no_auto:
+                item["status"] = "needs_action"
+                item["action"] = "本地 rapidocr 识别为文本并落盘，提醒用户校对"
+                item["warning"] = WARN_IMAGE
+                items.append(item)
+                continue
+            txt_path = os.path.join(ocr_dir, c["rel"] + ".ocr.txt")
+            os.makedirs(os.path.dirname(txt_path) or ocr_dir, exist_ok=True)
+            text, oerr = _ocr_file(p)
+            if text is not None:
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                item["preprocessed"] = "ocr"
+                item["preprocessed_copy"] = os.path.abspath(txt_path)
+                item["needs_proofread"] = True
+                item["warning"] = WARN_IMAGE
+                items.append(item)
+                continue
+            else:
+                item["status"] = "exception"
+                item["exception"] = oerr
+                exceptions.append(item)
+                items.append(item)
+                continue
+        # no_lib / error / empty / unsupported：列为异常（携带分类时的建议动作/警告）
+        item["status"] = "exception"
+        item["exception"] = c["reason"]
+        item["action"] = c.get("action")
+        item["warning"] = c.get("warning")
+        exceptions.append(item)
+        items.append(item)
+
+    # 直接可脱敏的原始文件拷入 ready（作为未脱敏副本，禁止外发）；
+    # 按相对路径保留目录结构，避免递归时同名文件互相覆盖
+    for p in treated_ready:
+        if os.path.basename(p) in META_SKIP:  # 不把流程自身元数据当业务文件拷贝
+            continue
+        dst = os.path.join(ready_dir, os.path.relpath(p, src_root))
+        if os.path.abspath(p) != os.path.abspath(dst):
+            os.makedirs(os.path.dirname(dst) or ready_dir, exist_ok=True)
+            shutil.copy2(p, dst)
+
+    # 写 manifest + 确认单
+    manifest = {
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "input": input_path,
+        "out_dir": out_dir,
+        "items": items,
+        "exceptions": [{"original": e["original"], "category": e["category"],
+                        "exception": e["exception"]} for e in exceptions],
+        "has_exception": bool(exceptions),
+        "note": "本确认单为脱敏前的本地预处理输出。encrypted/image/image_pdf 项已尝试自动"
+                "解密/OCR；异常项须处理后再纳入。原文件与未脱敏副本严禁外传。",
+    }
+    with open(args.manifest, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    summary_path = os.path.join(out_dir, "desensitize_preprocess_summary.md")
+    ready_list = [(os.path.abspath(p),
+                   os.path.abspath(os.path.join(
+                       ready_dir, os.path.relpath(p, src_root))))
+                  for p in treated_ready
+                  if os.path.basename(p) not in META_SKIP]
+    _write_preprocess_summary(summary_path, items, exceptions, out_dir,
+                              os.path.abspath(args.manifest), ready_list)
+
+    # 控制台摘要
+    print("本地预处理完成（自动解密 / rapidocr 本地 OCR，全程离线）%s：" %
+          ("[递归]" if args.recursive else ""), file=sys.stderr)
+    done = [it for it in items if it["status"] == "done"]
+    need = [it for it in items if it["status"] == "needs_action"]
+    print("  ✅ 已预处理（解密/OCR）：%d 项" % len(done), file=sys.stderr)
+    print("  🚫 异常（须处理）：%d 项" % len(exceptions), file=sys.stderr)
+    print("  📋 直接可脱敏（已拷入 ready/）：%d 项" % len(treated_ready), file=sys.stderr)
+    if need:
+        print("  ✎ 仅分类未处理（--no-auto）：%d 项" % len(need), file=sys.stderr)
+    print("  预处理工作区：%s" % out_dir, file=sys.stderr)
+    print("    - ready/ : 可直接脱敏文件（未脱敏副本·禁止外发）", file=sys.stderr)
+    print("    - ocr/   : OCR 文本（未脱敏·需校对·禁止外发）", file=sys.stderr)
+    print("  确认单（含保存/外发情况、OCR 校对、异常清单）：%s" % summary_path,
+          file=sys.stderr)
+    print("  清单 JSON：%s" % os.path.abspath(args.manifest), file=sys.stderr)
+    if exceptions:
+        print("  ⚠️ 存在 %d 项异常，请处理后再执行 run（run 也会拒绝异常未清）。"
+              % len(exceptions), file=sys.stderr)
+    else:
+        print("  无异常：确认 OCR 校对无误后，执行 run（带 --preprocess-manifest 再次校验）。",
+              file=sys.stderr)
+    n_proof = sum(1 for it in items if it.get("needs_proofread"))
+    if n_proof:
+        print("  📝 有 %d 个 OCR 文件需逐项校对。" % n_proof, file=sys.stderr)
 
 
 def cmd_scan(args):
@@ -699,6 +1320,28 @@ def cmd_run(args):
     out_root = args.out
     keys_dir = args.keys
     os.makedirs(out_root, exist_ok=True)
+
+    # 预处理闸门：若提供了预处理清单且仍有异常，拒绝执行（满足“异常清完再继续”）。
+    ppm_path = getattr(args, "preprocess_manifest", None)
+    if ppm_path:
+        # 预处理工作区（out_dir）内含 ready/ 与 ocr/ 子目录，强制递归扫描实际内容
+        args.recursive = True
+        try:
+            with open(ppm_path, "r", encoding="utf-8") as f:
+                ppm = json.load(f)
+        except Exception as e:
+            print("  [错误] 无法读取预处理清单 %s：%s" % (ppm_path, e), file=sys.stderr)
+            sys.exit(2)
+        if ppm.get("has_exception"):
+            print("  [拒绝执行] 预处理清单仍存在未处理异常，禁止脱敏/上云。异常清单：",
+                  file=sys.stderr)
+            for ex in ppm.get("exceptions", []):
+                print("    - %s  （%s）%s" % (ex.get("original"), ex.get("category"),
+                      ex.get("exception")), file=sys.stderr)
+            print("  请先本地处理上述异常（解密/安装库/OCR/转文本）后，将结果发回 AI Agent "
+                  "重新预处理，再执行 run。", file=sys.stderr)
+            sys.exit(1)
+        print("  [闸门通过] 预处理清单无异常，继续执行脱敏。", file=sys.stderr)
 
     mapping = {}
     token_map = {}
@@ -736,7 +1379,18 @@ def cmd_run(args):
         "collision_risks": collisions,
         "mapping_encrypted": enc_info["mapping_file"],
         "key_file": enc_info.get("key_file"),
-        "skipped_files": [os.path.relpath(p, src_root) for p, _ in skipped],
+        "skipped_files": [it.get("rel") if isinstance(it, dict)
+                          else os.path.relpath(it[0], src_root) for it in skipped],
+        "skipped_detail": [
+            {
+                "file": it.get("rel") if isinstance(it, dict) else os.path.relpath(it[0], src_root),
+                "category": it.get("category") if isinstance(it, dict) else "unsupported",
+                "reason": it.get("reason") if isinstance(it, dict) else it[1],
+                "action": it.get("action") if isinstance(it, dict) else None,
+                "warning": it.get("warning") if isinstance(it, dict) else None,
+            }
+            for it in skipped
+        ],
         "note": "原始敏感值仅存于加密映射表；脱敏副本位于 out 目录，可上云。"
                 "restoration_safety=unique 表示可无歧义恢复（token / hybrid 模式恒为 unique）；"
                 "=ambiguous 仅可能出现在 mask 模式（同型不同值碰撞），恢复可能混淆，"
@@ -905,7 +1559,8 @@ def cmd_restore(args):
 
 
 def cmd_audit(args):
-    """基于 run 生成的 desensitize_report.json 自动产出 11 项审计文档。"""
+    """基于 run 生成的 desensitize_report.json 自动产出审计文档（九节，
+    对齐 SKILL.md 的 11 项上云前自查清单）。"""
     report_path = args.report
     if not os.path.isfile(report_path):
         print("未找到报告文件：%s" % report_path, file=sys.stderr)
@@ -921,6 +1576,7 @@ def cmd_audit(args):
     mapping_file = rep.get("mapping_encrypted", "")
     key_file = rep.get("key_file") or "（由 --passphrase 派生，salt 存于 keys 目录）"
     skipped = rep.get("skipped_files", [])
+    skipped_detail = rep.get("skipped_detail", [])
     items = rep.get("items_encrypted", 0)
 
     # 简化分级：直接标识符 / 密钥类 → 高；其余 → 中
@@ -980,8 +1636,18 @@ def cmd_audit(args):
     else:
         L.append("- redact 不可逆，不适用恢复校验")
     L.append("")
-    L.append("## 七、未处理文件（skip manifest，须人工复核）")
-    if skipped:
+    L.append("## 七、异常清单 / 未处理文件（须逐条人工处理，切勿让后续流程跳过）")
+    if skipped_detail:
+        for d in skipped_detail:
+            L.append("- [%s] %s" % (d.get("category", "unsupported"), d.get("file", "")))
+            L.append("    - 原因：%s" % d.get("reason", ""))
+            if d.get("action"):
+                L.append("    - 建议动作：%s" % d.get("action"))
+            if d.get("warning"):
+                L.append("    - %s" % d.get("warning"))
+        L.append("> 上述文件未脱敏，上云前须按建议本地处理（解密 / OCR / 安装库 / 人工复核）"
+                 "或确认不含敏感信息；原始文件与未脱敏文件均不得直接外传（SKILL.md 本地预处理关卡）。")
+    elif skipped:
         for s in skipped:
             L.append("- %s" % s)
         L.append("> 上述文件未脱敏，上云前须转文本/OCR/解密或确认不含敏感信息（SKILL.md 红线）")
@@ -989,7 +1655,7 @@ def cmd_audit(args):
         L.append("- 无（全部目标文件已处理或被显式忽略）")
     L.append("")
     L.append("## 八、外泄风险自评")
-    risk = "低" if (safety == "unique" and not skipped) else "中"
+    risk = "低" if (safety == "unique" and not skipped_detail) else "中"
     L.append("- 风险等级：%s" % risk)
     L.append("- 理由：脱敏副本可上云；原始/映射表留本地分离；%s"
              % ("存在歧义/未处理文件需关注" if risk == "中"
@@ -997,7 +1663,7 @@ def cmd_audit(args):
     L.append("")
     L.append("## 九、操作人与待办")
     L.append("- 操作人：AI Agent（本地执行）")
-    L.append("- 异常与待办：%s" % ("无" if not (collisions or skipped)
+    L.append("- 异常与待办：%s" % ("无" if not (collisions or skipped_detail)
                                     else "见第六/七节，需人工复核后上云"))
     L.append("")
     L.append("> 本审计由 `desensitize.py audit` 自动生成；SKILL.md 规定的 11 项上云前自查"
@@ -1033,6 +1699,8 @@ def build_parser():
     rp.add_argument("--names", help="已知姓名清单文件（每行一个）")
     rp.add_argument("--cn-enhance", action="store_true",
                     help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
+    rp.add_argument("--preprocess-manifest", default=None,
+                    help="预处理清单 JSON；若仍含异常则拒绝执行 run（异常清完再继续）")
     rp.set_defaults(func=cmd_run)
 
     dp = sub.add_parser("decrypt", help="解密映射表，供本地复核可逆性（不依赖上云）")
@@ -1046,7 +1714,7 @@ def build_parser():
     rp2 = sub.add_parser("restore", help="用映射表把脱敏副本回填为含原值的内部文档")
     rp2.add_argument("--keys", default="./.desensitize_keys", help="加密映射表目录")
     rp2.add_argument("--input", default="./desensitized",
-                     help="脱敏副本目录/文件（默认 ./desensitized）")
+                     help="脱敏副本目录（默认 ./desensitized；按映射表中的相对路径在该目录内定位副本）")
     rp2.add_argument("--out", default="./restored",
                      help="回填后内部文档输出目录（默认 ./restored）")
     rp2.add_argument("--file", default=None, help="指定 mapping_*.json.enc（默认取目录中最新一个）")
@@ -1056,12 +1724,27 @@ def build_parser():
                      help="仅回填指定类型，逗号分隔（如 name,id_card）；默认全部回填")
     rp2.set_defaults(func=cmd_restore)
 
-    ap = sub.add_parser("audit", help="基于 run 报告自动生成 11 项脱敏审计文档")
+    ap = sub.add_parser("audit", help="基于 run 报告自动生成审计文档（九节，对齐 11 项自查清单）")
     ap.add_argument("--report", default="./desensitize_report.json",
                     help="run 生成的报告（默认 ./desensitize_report.json）")
     ap.add_argument("--out", default="./desensitize_audit.md",
                     help="审计文档输出路径（默认 ./desensitize_audit.md）")
     ap.set_defaults(func=cmd_audit)
+
+    pp = sub.add_parser("preprocess",
+                         help="本地预处理关卡（自动解密 / rapidocr 本地 OCR）：生成预处理确认单与异常清单")
+    pp.add_argument("input", help="文件或目录")
+    pp.add_argument("--recursive", action="store_true", help="递归处理目录")
+    pp.add_argument("--out-dir", default="./preprocessed",
+                    help="预处理工作区（默认 ./preprocessed，含 ready/ 与 ocr/ 子目录）")
+    pp.add_argument("--manifest", default=None,
+                    help="预处理清单 JSON（默认 <out-dir>/desensitize_preprocess.json）")
+    pp.add_argument("--passwords-file", default=None,
+                    help="解密候选密码文件：每行一个；或 JSON 列表 / {文件名:密码}。"
+                         "该文件含敏感信息，严禁外传")
+    pp.add_argument("--no-auto", action="store_true",
+                    help="仅分类与提醒（旧行为），不实际解密/OCR")
+    pp.set_defaults(func=cmd_preprocess)
     return p
 
 
