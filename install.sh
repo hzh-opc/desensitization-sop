@@ -8,7 +8,7 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
-  echo "[FAIL] 未找到 python3 / python，请先安装 Python 3.8+。"
+  echo "[FAIL] 未找到 python3 / python，请先安装 Python 3.10+。"
   exit 1
 fi
 
