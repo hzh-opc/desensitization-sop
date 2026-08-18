@@ -27,6 +27,8 @@
   6. **SQL INSERT 位置参数口令**：按「列名含口令关键词 → VALUES 对应位置值」定位脱敏（`INSERT INTO users (…, password, …) VALUES (…, 'secret_pass_123', …)` 前无 `password=` 前缀，SECRET_PATTERN 无法捕获）；scan 与 run 计数一致；无列名 INSERT 仍无法定位（保留局限）。
 - **新增「先清洗再脱敏」提醒机制（清洗建议，面向小微业务随意填写）**：新增 `MESSY_PATTERNS` + `_find_cleaning_advice()`，检测疑似未清洗数据形态——带分隔符手机号（`138-0013-8004`/`138 0013 8002`）、10 位手机、15 位旧身份证、订单号/流水号标签后紧跟 16-19 位纯数字（与银行卡区间重叠易误判）——**只提醒、不自动改**（fail-safe：宁可让用户先清洗/复核，也不静默放过或误伤）。scan 控制台逐文件输出 `⚠清洗建议 {类别: 次数}` + 汇总文案；run 报告新增 `cleaning_advice`（分类计数）与 `cleaning_advice_text`（建议文案）。测试：20 用例 PASS 17 / KNOWN_LIMIT 3 / FAIL 0（E9/E10/E11/E12/E19 由 KNOWN_LIMIT → PASS，新增 E20 清洗建议验证）；run_tests（19 用例 16/3/0，T19/T20 同步 v2.5.0 新豁免模型断言）、run_source_tests、install verify 4/4 全部回归通过。
 
+- **升级脚本健壮性修复（发布后补）**：`upgrade.py` 的 `parse_version()` 现兼容 `SKILL.md` frontmatter 带引号的 `version`（如 v2.4.x 的 `version: "2.4.2"`）——此前因不剥引号，从 2.4.x 升级时无法识别起始版本（显示「未知」、降级保护失效）。修复后 **v2.4.2 → v2.5.0 升级链路已手动验证通过**（暂存→校验→备份→原子替换→线上实测，本地源）。
+
 ## v2.4.2 · 2026-08-17（结构调整：贴合 skill-creator 规范）
 
 - **目录与文件对齐 skill-creator 标准约定**：
