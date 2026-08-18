@@ -64,3 +64,15 @@ If the target AI tool was already running, tell the user to **restart it** (or r
 - only the `desensitized/` copy may go to the cloud;
 - the mapping keys (`.desensitize_keys/`) **never leave the machine**;
 - automated detection is not 100% — always **review manually** before uploading.
+
+## 5. Upgrading (manual, safe zero-downtime)
+
+The skill ships `upgrade.py` (same paradigm as `install.py`). **Upgrades are manual only** — never auto-upgrade on load. When the user explicitly asks to upgrade/update the skill, run:
+
+```bash
+python3 upgrade.py            # check for updates; if any: download → verify → apply
+python3 upgrade.py --check    # only check whether an update exists (no download/apply)
+python3 upgrade.py --dry-run  # download + verify, but do NOT swap in (safest trial)
+```
+
+`upgrade.py` downloads the new version into a **staging directory on the same filesystem** as the live skill, builds its venv and runs the `scan → run → decrypt → restore` round-trip on the staged copy (**rejects the swap if verification fails**), then renames the live skill to a backup and atomically renames the staged copy into place — re-verifying afterward and **auto-rolling-back on failure**. The live skill is never touched until verification passes, so a failed upgrade cannot break the skill's callability.
