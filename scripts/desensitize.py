@@ -58,7 +58,7 @@ onnxruntime 目前不提供 free-threaded wheel，3.14 支持亦未完备，
   uv run --project <tool_dir> python desensitize.py restore --keys ./.desensitize_keys \
       --types name,id_card --out ./restored_names
 
-  # 审计：基于 run 报告自动生成 11 项审计文档
+  # 审计：基于 run 报告自动生成 12 项审计文档
   uv run --project <tool_dir> python desensitize.py audit \
       --report ./desensitize_report.json --out ./desensitize_audit.md
 
@@ -74,6 +74,7 @@ onnxruntime 目前不提供 free-threaded wheel，3.14 支持亦未完备，
 import argparse
 import fnmatch
 import glob
+import hashlib
 import json
 import os
 import re
@@ -341,6 +342,7 @@ WS_KEYS = "04_映射表_保密"
 WS_SELFCHECK = "05_上云前自检报告.md"
 WS_AUDIT = "06_审计与回填/审计记录.md"
 WS_RESTORE = "06_审计与回填/回填成果"
+WS_LOCAL_ONLY = "07_本地处理不外发"   # 🚫 不外发：仅本地处理、未脱敏原文，严禁上云、不得与脱敏副本一起存放
 WS_INDEX_JSON = "成果索引.json"
 WS_INDEX_MD = "成果索引.md"
 
@@ -374,9 +376,10 @@ def _write_workspace_readme(path, ws):
         "| `02_未脱敏副本/` | 🚫 保密 | 原始 / 解密 / OCR 文本等未脱敏材料，**严禁外传** |",
         "| `04_映射表_保密/` | 🚫 保密 | 加密映射表（重识别钥匙），**绝不随副本上传** |",
         "| `06_审计与回填/回填成果/` | 🚫 保密 | 回填后的含原值内部文档，勿随副本外传 |",
+        "| `07_本地处理不外发/` | 🚫 不外发 | 声明仅本地处理、未脱敏的原文，**严禁上云、不得与脱敏副本一起存放** |",
         "| `01_预处理确认单.md` | 内部 | 预处理确认：外发清单、OCR 校对、异常、确认闸门 |",
-        "| `05_上云前自检报告.md` | 内部 | **上云前必读**：三处校对提醒 + 确认闸门 |",
-        "| `06_审计与回填/审计记录.md` | 内部 | 对齐 11 项自查清单的审计文档 |",
+        "| `05_上云前自检报告.md` | 内部 | **上云前必读**：四处校对提醒 + 确认闸门 |",
+        "| `06_审计与回填/审计记录.md` | 内部 | 对齐 12 项自查清单的审计文档 |",
         "| `成果索引.json` / `成果索引.md` | 内部 | 本索引，随时查看全部产物位置 |",
         "",
         "## 上云前必做（按顺序）",
@@ -406,9 +409,10 @@ def _refresh_index(ws):
     _add("未脱敏副本·OCR 待校对", WS_OCR, "保密", "严禁上云：OCR 识别文本，须逐字校对")
     _add("脱敏副本", WS_DESEN, "可上云", "★唯一允许上传云端的目录")
     _add("映射表", WS_KEYS, "保密", "重识别钥匙，绝不随副本上传")
-    _add("上云前自检报告", WS_SELFCHECK, "内部", "三处校对提醒 + 确认闸门，上云前必读")
-    _add("审计记录", WS_AUDIT, "内部", "对齐 11 项自查清单的审计文档")
+    _add("上云前自检报告", WS_SELFCHECK, "内部", "四处校对提醒 + 确认闸门，上云前必读")
+    _add("审计记录", WS_AUDIT, "内部", "对齐 12 项自查清单的审计文档")
     _add("回填成果", WS_RESTORE, "保密", "含原值内部文档，勿随副本外传")
+    _add("本地处理不外发", WS_LOCAL_ONLY, "不外发", "仅本地处理、未脱敏原文，严禁上云、不得与脱敏副本一起存放")
     idx = {"workspace": os.path.abspath(ws),
            "generated": datetime.now().isoformat(timespec="seconds"),
            "entries": entries}
@@ -423,14 +427,15 @@ def _refresh_index(ws):
     for e in entries:
         L.append("| %s | **%s** | `%s` | %s |" % (e["name"], e["tag"], e["path"], e["desc"]))
     L.append("")
-    L.append("> 仅 `03_脱敏副本/` 可上云；`02_未脱敏副本/`、`04_映射表_保密/`、`06_审计与回填/回填成果/` 均须留本地。")
-    L.append("> 上云前请先阅读 `05_上云前自检报告.md` 并完成三处校对。")
+    L.append("> 仅 `03_脱敏副本/` 可上云；`02_未脱敏副本/`、`04_映射表_保密/`、`06_审计与回填/回填成果/`、`07_本地处理不外发/` 均须留本地。")
+    L.append("> 上云前请先阅读 `05_上云前自检报告.md` 并完成四处校对。")
     with open(os.path.join(ws, WS_INDEX_MD), "w", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")
 
 
 def _write_selfcheck_report(ws, rep, ocr_dir):
-    """生成《上云前自检报告》：汇总 OCR 副本 / 脱敏副本 / 公开豁免留痕，并设确认闸门。"""
+    """生成《上云前自检报告》：汇总 OCR 副本 / 脱敏副本 / 本地不外发留痕 / 公开豁免留痕，
+    并设确认闸门。"""
     out = os.path.join(ws, WS_SELFCHECK)
     counts = rep.get("counts", {}) or {}
     mode = rep.get("mode", "")
@@ -464,7 +469,19 @@ def _write_selfcheck_report(ws, rep, ocr_dir):
     L.append("> 请抽查脱敏是否到位（敏感字段已被替换），同时确认未误伤业务实质内容。")
     L.append("> 仅此目录可上传云端。")
     L.append("")
-    L.append("## 三、公开声明豁免留痕（如适用）")
+    L.append("## 三、本地处理·无需外发豁免留痕（如适用）")
+    loc = [d for d in skipped_detail if d.get("category") == "local_only"]
+    if loc:
+        for d in loc:
+            L.append("- `%s` — %s" % (d.get("file"), d.get("reason", "")))
+        L.append("")
+        L.append("> ⚠ 上述文件经你声明仅本地处理而跳过脱敏，为未脱敏原文。请确认：")
+        L.append("> ① 它们已隔离存放于 `07_本地处理不外发/`（不在可上云目录）；")
+        L.append("> ② 绝不外发、绝不与 `03_脱敏副本/` 一起上传。误上传会导致敏感外泄。")
+    else:
+        L.append("- 本次无本地处理·无需外发豁免。")
+    L.append("")
+    L.append("## 四、公开声明豁免留痕（如适用）")
     pub = [d for d in skipped_detail if d.get("category") == "public_declared"]
     if pub:
         for d in pub:
@@ -474,16 +491,17 @@ def _write_selfcheck_report(ws, rep, ocr_dir):
     else:
         L.append("- 本次无公开声明豁免。")
     L.append("")
-    L.append("## 四、映射表（重识别钥匙 · 保密）")
+    L.append("## 五、映射表（重识别钥匙 · 保密）")
     L.append("- 加密映射表：`%s`" % mapping)
     L.append("- 密钥：`%s`（权限 600）" % keyf)
     L.append("> 映射表与副本须分离、加密、最小权限；**绝不随副本上传**。")
     L.append("")
-    L.append("## 五、确认闸门（上云前必须完成）")
-    L.append("请在上传云端前，确认以下三项均已完成：")
+    L.append("## 六、确认闸门（上云前必须完成）")
+    L.append("请在上传云端前，确认以下各项均已完成：")
     L.append("1. ✅ 已逐字校对 OCR 待校对副本（第一节）；")
     L.append("2. ✅ 已抽查脱敏副本脱敏到位、未误伤业务（第二节）；")
-    L.append("3. ✅ 已阅读本报告、确认公开豁免留痕无误（第三、四节）。")
+    L.append("3. ✅ 已确认「本地处理·无需外发」文件隔离存放、绝不外发（第三节）；")
+    L.append("4. ✅ 已阅读本报告、确认公开豁免留痕无误（第四节）。")
     L.append("")
     L.append("> **确认方式**：请明确回复「确认上云」。AI Agent 收到后才会将 `03_脱敏副本/` 上传云端；")
     L.append("> 期间如发现任何异常 / 遗漏，请直接指出，AI 将补充或修正后再请你确认。")
@@ -505,6 +523,11 @@ def _write_selfcheck_report(ws, rep, ocr_dir):
 PUBLIC_MANIFEST_NAMES = (".nodesens", "desensitize_manifest.json")  # 伴随清单（高级）
 PUBLIC_DECL_WARNING = ("请确认确为公开信息：被声明豁免的文件不会被脱敏，"
                        "若声明有误可能导致敏感信息未经脱敏直接外传。")
+LOCAL_ONLY_WARNING = ("请确认仅本地处理、绝不外发：被声明仅本地处理的文件不会被脱敏，"
+                      "若误上传云端将导致敏感信息未经脱敏直接外泄；"
+                      "且不得与脱敏副本（可上云）一起存放。"
+                      "本地处理中追加/生成的数据如需外发，须重新 scan 检验 + run 脱敏 + 留痕"
+                      "（豁免以「不外发」为前提，外发即失效）。")
 
 
 def _read_manifest(fp):
@@ -585,6 +608,24 @@ def is_public_declared(path, src_root, manifests, assume_public, public_paths=No
                 return "伴随清单声明(%s)" % os.path.relpath(mfile, src_root)
     return None
 
+
+def is_local_declared(path, src_root, local_only, local_paths=None):
+    """返回“本地处理·无需外发豁免”原因字符串；未声明返回 None。
+    语义：内容可能含敏感信息，但仅本地处理、无需外发 → 跳过脱敏（不脱敏、
+    不写入可上云目录、绝不外发）。与“公开声明豁免”的区别：公开=内容公开可上云；
+    本地=内容保密但只本地处理，故跳过脱敏但**严禁上云**。
+    判定顺序：① --local-only 全局声明；② --local-paths 指定文件/文件夹
+    （文件夹=其下全部递归，文件=该文件）。不做任何文件名/目录名隐式推断。"""
+    if local_only:
+        return "用户声明仅本地处理(--local-only)"
+    absp = os.path.abspath(path)
+    for lp, kind in _resolve_public_paths(local_paths):  # 纯路径解析，public/local 共用
+        if kind == "file" and absp == lp:
+            return "用户声明仅本地处理(文件: %s)" % os.path.relpath(lp, src_root)
+        if kind == "dir" and (absp == lp or absp.startswith(lp + os.sep)):
+            return "用户声明仅本地处理(文件夹: %s)" % os.path.relpath(lp, src_root)
+    return None
+
 # 本地 OCR：rapidocr（纯 pip 安装，模型随 wheel 捆绑，完全离线、数据不出本机）。
 # 引擎按需惰性初始化（首次加载模型约数秒，之后常驻复用）。
 OCR_NOTE = ("本地 OCR 使用 rapidocr + onnxruntime（纯 pip、模型内置、完全离线）。"
@@ -606,6 +647,46 @@ PREPROCESS_ACTIONS = {
 # ---------------------------------------------------------------------------
 # 2. 脱敏替换策略
 # ---------------------------------------------------------------------------
+# 生僻字 / 特殊字符判定（脱敏时优先 mask，避免保留高识别度生僻字或破坏格式的特殊字符）
+# - 生僻字：CJK 扩展区（Ext-A/B/C/D/E/F/G）+ 兼容表意文字。这些字在常用字体/输入法里
+#   极少出现，保留首字（如「㐀」作姓氏）会泄露高识别度特征。
+# - 特殊字符：非「常见字符」——既非 ASCII 字母数字/常见符号，也非 CJK 基本区汉字、
+#   常见中文标点、空白（emoji、控制字符、私有区、数学符号等）。
+# - 边界：CJK 基本区（U+4E00-9FFF）内的罕见字（如「爨」「龘」）不在自动判定范围，
+#   需人工复核（见 SKILL.md「生僻字与特殊字符」边界说明）。
+_CJK_RARE_RANGES = (
+    (0x3400, 0x4DBF),    # CJK 扩展 A（6592 生僻字）
+    (0xF900, 0xFAFF),    # CJK 兼容表意文字（含罕见兼容字）
+    (0x20000, 0x2FA1F),  # CJK 扩展 B~F（含兼容补充 2F800-2FA1F）
+    (0x30000, 0x323AF),  # CJK 扩展 G（最新增补，极罕见）
+)
+_COMMON_CJK_PUNCT = set("，。、；：？！“”‘’（）【】《》—…·　")
+
+
+def _is_rare_cjk(ch: str) -> bool:
+    """是否 CJK 生僻字（扩展区/兼容区）。基本区罕见字（如「爨」）不在此自动判定范围。"""
+    o = ord(ch)
+    return any(lo <= o <= hi for lo, hi in _CJK_RARE_RANGES)
+
+
+def _is_common_char(ch: str) -> bool:
+    """是否「常见字符」：ASCII 字母数字/常见符号、CJK 基本区汉字、常见中文标点、空白。"""
+    o = ord(ch)
+    if 0x4E00 <= o <= 0x9FFF:          # CJK 基本区汉字
+        return True
+    if ch.isascii():
+        return ch.isalnum() or ch in " -_@.:/\\"
+    if ch in _COMMON_CJK_PUNCT or ch.isspace():
+        return True
+    return False
+
+
+def _has_rare_or_special(value: str) -> bool:
+    """字段值是否含生僻字（CJK 扩展/兼容区）或特殊字符（非常见字符）。
+    命中 → 脱敏时优先全掩码，不保留含此类字符的首字/尾字。"""
+    return any(_is_rare_cjk(c) or not _is_common_char(c) for c in value)
+
+
 def mask_value(kind: str, value: str) -> str:
     """按类型做掩码（可逆映射由调用方记录）。"""
     if kind == "phone" and len(value) == 11:
@@ -633,13 +714,18 @@ def mask_value(kind: str, value: str) -> str:
             return value[:6] + "***" + value[-6:]
         return value[:3] + "***"
     if kind in ("cn_name", "name"):
+        # 含生僻字/特殊字符 → 优先全掩码（避免保留高识别度生僻字或破坏格式的特殊字符）
+        if _has_rare_or_special(value):
+            return "*" * len(value)
         # 保留姓氏/首字，其余脱敏（原始值仍记录于加密映射表，可逆）
         return value[0] + "*" * (len(value) - 1)
     if kind == "cn_address":
         return "[地址]"
     if kind == "cn_org":
         return "[机构]"
-    # 兜底：首尾各留 1，中间掩码
+    # 兜底：含生僻字/特殊字符 → 全掩码；否则首尾各留 1，中间掩码
+    if _has_rare_or_special(value):
+        return "*" * len(value)
     if len(value) <= 2:
         return "*" * len(value)
     return value[0] + "*" * (len(value) - 2) + value[-1]
@@ -667,7 +753,7 @@ HYBRID_SEP_L, HYBRID_SEP_R = "⟦", "⟧"
 # 3. 识别与脱敏核心
 # ---------------------------------------------------------------------------
 def desensitize_text(text: str, mode: str, token_map: dict, counts: dict,
-                     names: set = None, patterns=None):
+                     names: set = None, patterns=None, custom_map=None):
     """对单段文本做脱敏，返回 (脱敏后文本, 命中列表)。
 
     注意：必须一次性构建新串（re.sub + 回调），不可在 finditer 迭代中
@@ -676,11 +762,28 @@ def desensitize_text(text: str, mode: str, token_map: dict, counts: dict,
     re.sub 会按需动态拼接新串，无需、也无法在扫描阶段预分配固定长度，
     因此不存在“替换串长度不足”的失败模式——令牌超过 9999 个时自动扩展为
     T10000… 仍唯一且可被分隔符 ⟦ ⟧ 正确解析。
+
+    custom_map：用户自定义脱敏映射（原始值→替换值），**独立于识别正则**——
+    用户指定即视为需脱敏，精确匹配后替换为用户指定值（原样、不加令牌），
+    可逆性由加密映射表反查保证。
     """
     if patterns is None:
         patterns = PATTERNS
     hits = []
     result = text
+
+    # 3.0 用户自定义脱敏映射（原始值→替换值）：主动精确匹配，命中即替换为用户指定值
+    #     （先于 names/正则，故用户映射的值不会再次被自动掩码覆盖）
+    if custom_map:
+        for orig in sorted(custom_map, key=len, reverse=True):
+            if not orig:
+                continue
+            repl = custom_map[orig]
+            def _cb(m, _orig=orig, _repl=repl):
+                counts["custom"] = counts.get("custom", 0) + 1
+                hits.append({"type": "custom", "original": _orig, "replacement": _repl})
+                return _repl
+            result = re.sub(re.escape(orig), _cb, result)
 
     # 3.1 自定义姓名清单（若有）
     if names:
@@ -762,19 +865,35 @@ def _read_text(path):
 def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: dict,
                  mapping: dict, names: set, counts_total: dict, do_write: bool,
                  patterns=None, skipped=None, public_manifests=None,
-                 assume_public=False, public_paths=None, cleaning=None):
+                 assume_public=False, public_paths=None, local_only=False,
+                 local_paths=None, local_out_root=None, cleaning=None,
+                 custom_map=None):
     """处理单个文件。skipped 为可选 list，用于收集“未处理文件”（skip manifest）。
     public_manifests/assume_public/public_paths 用于“公开声明豁免”：命中则跳过脱敏
-    （留痕+警示，绝不静默）。声明豁免不做文件名/目录名隐式推断。
+    （留痕+警示，绝不静默）。local_only/local_paths 用于“本地处理·无需外发豁免”：
+    命中则跳过脱敏且绝不写入可上云目录（工作区模式下原样复制到隔离目录 07_本地处理不外发/，
+    与 03_脱敏副本/ 物理隔离）。豁免不做文件名/目录名隐式推断。
+    二者同时命中时「本地处理」优先（不外发比可上云更严格）。
+    custom_map 为用户自定义脱敏映射（原始值→替换值），命中优先用用户替换值。
     cleaning 为可选 dict，累计“疑似未清洗数据形态”计数（仅提醒，不脱敏）。"""
     try:
         # 跳过流程自身产出的元数据文件，避免把清单/报告当作业务文本脱敏
         if os.path.basename(path) in META_SKIP:
             return "skip_meta"
-        # 公开声明豁免（默认全脱敏，用户显式声明才跳过）
+        # 豁免判定（本地处理优先于公开：不外发比可上云更严格，先判 local）
+        local_reason = is_local_declared(path, src_root, local_only, local_paths)
         pub_reason = is_public_declared(path, src_root, public_manifests,
                                         assume_public, public_paths)
-        if pub_reason:
+        if local_reason:
+            if do_write:
+                # run 模式：仅本地处理不脱敏、绝不写入可上云目录；工作区模式复制到隔离目录留痕
+                if local_out_root:
+                    _copy_to_local_only(path, src_root, local_out_root)
+                _record_local_only(skipped, path, src_root,
+                                   local_reason + "，已跳过脱敏（仅本地处理，严禁外发）")
+                return "skipped"
+            # scan 模式：继续下方读取并检测（fail-safe：仍报命中，不计入脱敏计划）
+        elif pub_reason:
             if do_write:
                 # run 模式：被声明公开的文件不脱敏、不写入输出目录（仅留痕）
                 _record_public_declared(skipped, path, src_root,
@@ -786,11 +905,18 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
         if ext in EXTRACT_EXTS:
             return _process_extracted(path, mode, out_root, src_root, token_map,
                                       mapping, names, counts_total, do_write,
-                                      patterns, skipped, pub_reason)
+                                      patterns, skipped, local_reason, pub_reason,
+                                      local_out_root, custom_map)
         # 既非文本/代码也非可抽取类型：登记为未处理（不静默忽略）
         if ext not in (TEXT_EXTS | CODE_EXTS):
             if skipped is not None:
-                if pub_reason:
+                if local_reason:
+                    # 声明仅本地处理但非文本类：登记为 local_only（覆盖默认分类）
+                    if local_out_root:
+                        _copy_to_local_only(path, src_root, local_out_root)
+                    _record_local_only(skipped, path, src_root,
+                                       local_reason + "，已跳过脱敏（非文本类，未检测，仅本地处理）")
+                elif pub_reason:
                     # 声明公开但非文本类：登记为公开声明（覆盖默认分类）
                     _record_public_declared(skipped, path, src_root,
                                             pub_reason + "，已跳过脱敏（非文本类，未检测）")
@@ -832,6 +958,14 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
                 sec2 = len(_sql_insert_secret_values(text))
                 if sec2:
                     c["secret"] = c.get("secret", 0) + sec2
+        if local_reason:
+            # scan 仍检测：若检出疑似敏感，追加警示；声明文件不计入脱敏计划
+            reason = local_reason + "，已跳过脱敏（仅本地处理，严禁外发）"
+            if c:
+                reason += "（scan 仍检出 %d 处疑似敏感，请复核）" % sum(c.values())
+                print("  %-40s %s  ⚠ 声明仅本地处理但检出疑似敏感" % (rel_path, c))
+            _record_local_only(skipped, path, src_root, reason)
+            return "skipped"
         if pub_reason:
             # scan 仍检测：若检出疑似敏感，追加警示；声明文件不计入脱敏计划
             reason = pub_reason + "，已跳过脱敏"
@@ -881,7 +1015,7 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
                     {"type": "secret", "original": inner, "replacement": repl})
                 text = text.replace(quoted, repl, 1)
 
-    new_text, hits = desensitize_text(text, mode, token_map, counts_total, names, patterns)
+    new_text, hits = desensitize_text(text, mode, token_map, counts_total, names, patterns, custom_map)
     for h in hits:
         h["file"] = rel_path
         mapping.setdefault(rel_path, []).append(h)
@@ -1058,7 +1192,8 @@ def _pdf_has_encrypt(path):
 
 def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
                        names, counts_total, do_write, patterns, skipped,
-                       pub_reason=None, cleaning=None):
+                       local_reason=None, pub_reason=None, local_out_root=None,
+                       cleaning=None, custom_map=None):
     ext = os.path.splitext(path)[1].lower()
     rel_path = os.path.relpath(path, src_root)
     text, missing, reason = _extract_text(ext, path)
@@ -1071,7 +1206,11 @@ def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
             cat = {"encrypted": "encrypted", "image_only": "image_pdf",
                    "empty": "empty", "error": "error"}.get(reason, "error")
             reason = REMIND.get(reason, "文本抽取失败（请确认文件未加密且未损坏）")
-        if pub_reason:
+        if local_reason:
+            # 声明仅本地处理但无法抽取文本：登记为 local_only，不按异常报
+            _record_local_only(skipped, path, src_root,
+                               local_reason + "，已跳过脱敏（无法抽取文本，未检测，仅本地处理）")
+        elif pub_reason:
             # 声明公开但无法抽取文本（加密/图片型等）：登记为公开声明，不按异常报
             _record_public_declared(skipped, path, src_root,
                                     pub_reason + "，已跳过脱敏（无法抽取文本，未检测）")
@@ -1086,6 +1225,14 @@ def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
             cleaning[k] = cleaning.get(k, 0) + v
     if not do_write:
         c = scan_text(text, names, patterns)
+        if local_reason:
+            # scan 仍检测：若检出疑似敏感，追加警示；不计入脱敏计划
+            reason = local_reason + "，已跳过脱敏（仅本地处理，严禁外发）"
+            if c:
+                reason += "（scan 仍检出 %d 处疑似敏感，请复核）" % sum(c.values())
+                print("  %-40s %s  ⚠ 声明仅本地处理但检出疑似敏感" % (rel_path, c))
+            _record_local_only(skipped, path, src_root, reason)
+            return "skipped"
         if pub_reason:
             # scan 仍检测：若检出疑似敏感，追加警示；不计入脱敏计划
             reason = pub_reason + "，已跳过脱敏"
@@ -1101,10 +1248,17 @@ def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
         if adv:
             print("  %-40s ⚠清洗建议 %s（先清洗再脱敏）" % (rel_path, adv))
         return "processed"
+    if local_reason:
+        # run 模式：仅本地处理不脱敏、绝不写入可上云目录；工作区模式复制到隔离目录留痕
+        if local_out_root:
+            _copy_to_local_only(path, src_root, local_out_root)
+        _record_local_only(skipped, path, src_root,
+                           local_reason + "，已跳过脱敏（仅本地处理，严禁外发）")
+        return "skipped"
     if pub_reason:
         _record_public_declared(skipped, path, src_root, pub_reason + "，已跳过脱敏")
         return "skipped"
-    new_text, hits = desensitize_text(text, mode, token_map, counts_total, names, patterns)
+    new_text, hits = desensitize_text(text, mode, token_map, counts_total, names, patterns, custom_map)
     for h in hits:
         h["file"] = rel_path
         mapping.setdefault(rel_path, []).append(h)
@@ -1181,15 +1335,37 @@ def find_collisions(mapping: dict):
 
 def _report_skipped(skipped, src_root):
     """打印“未处理文件清单”（skip manifest），杜绝目录扫描的静默漏扫。
-    区分两类：public_declared（用户显式声明公开，已跳过脱敏）与其他（可能含敏感，须处理）。
+    区分三类：local_only（仅本地处理·无需外发，已跳过脱敏）、public_declared（用户显式
+    声明公开，已跳过脱敏）与其他（可能含敏感，须处理）。
     兼容旧式 (path, reason) 元组与新式 dict 两种结构。"""
     if not skipped:
         return
+    loc = []
     pub = []
     others = []
     for it in skipped:
         cat = it.get("category") if isinstance(it, dict) else None
-        (pub if cat == "public_declared" else others).append(it)
+        (loc if cat == "local_only"
+         else pub if cat == "public_declared"
+         else others).append(it)
+
+    if loc:
+        print("\n[本地处理·无需外发豁免] 以下 %d 个文件经用户声明仅本地处理（--local-only / "
+              "--local-paths），已跳过脱敏（不脱敏、不计数、不报告命中）："
+              % len(loc), file=sys.stderr)
+        for it in loc:
+            rel = it.get("rel") or os.path.relpath(it.get("path", ""), src_root)
+            reason = it.get("reason", "")
+            print("    - %s  （%s）" % (rel, reason), file=sys.stderr)
+            sz = it.get("size")
+            sh = it.get("sha256")
+            if sz is not None:
+                print("        🔒 %d bytes  sha256:%s" % (sz, sh), file=sys.stderr)
+            w = it.get("warning")
+            if w:
+                print("        ⚠ %s" % w, file=sys.stderr)
+        print("  → 请确认这些文件仅本地处理、绝不外发；误上传云端会导致敏感信息未经脱敏直接外泄。",
+              file=sys.stderr)
 
     if pub:
         print("\n[公开声明豁免] 以下 %d 个文件经用户显式声明为公开（--assume-public / "
@@ -1275,6 +1451,43 @@ def load_names(path: str):
         return set()
 
 
+def load_custom_mapping(path: str):
+    """加载用户自定义脱敏映射（原始值 → 替换值），供 `--mapping` 使用。
+    支持两种格式：
+      - JSON：{"原始值": "替换值", ...}
+      - 文本：每行 "原始值=替换值" 或 "原始值<TAB>替换值"（# 注释、空行忽略）。
+    ⚠ 该映射文件含敏感信息（原始值），严禁外传；仅本地使用，命中结果随加密
+    映射表（.desensitize_keys/）本地保存、绝不外发。文件不存在/解析失败返回 None
+    （调用方告警后忽略，不影响主流程）。"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read().lstrip("\ufeff")
+        s = raw.strip()
+        if s.startswith("{"):
+            data = json.loads(raw)
+            return {str(k): str(v) for k, v in data.items()} or None
+        m = {}
+        for ln in raw.splitlines():
+            line = ln.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+            elif "\t" in line:
+                k, v = line.split("\t", 1)
+            else:
+                continue
+            k, v = k.strip(), v.strip()
+            if k and v:
+                m[k] = v
+        return m or None
+    except Exception as e:
+        print("  [警告] 无法解析自定义映射文件 %s：%s（已忽略）" % (path, e), file=sys.stderr)
+        return None
+
+
 def _skip(skipped, path, src_root, category, reason, action=None, warning=None, extra=None):
     """向 skipped 列表追加结构化未处理项（dict）。skipped 为 None 时跳过。
     分类与动作/警告来自 PREPROCESS_ACTIONS，允许调用处显式覆盖。
@@ -1313,6 +1526,36 @@ def _record_public_declared(skipped, path, src_root, reason):
         pass
     _skip(skipped, path, src_root, "public_declared", reason,
           warning=PUBLIC_DECL_WARNING, extra=meta)
+
+
+def _record_local_only(skipped, path, src_root, reason):
+    """记录“本地处理·无需外发豁免”项，附带 size/sha256（绝不静默）。"""
+    meta = {}
+    try:
+        meta["size"] = os.path.getsize(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        meta["sha256"] = h.hexdigest()
+    except Exception:
+        pass
+    _skip(skipped, path, src_root, "local_only", reason,
+          warning=LOCAL_ONLY_WARNING, extra=meta)
+
+
+def _copy_to_local_only(path, src_root, local_out_root):
+    """工作区模式：把「仅本地处理」的未脱敏文件原样复制到隔离目录
+    （07_本地处理不外发/），与可上云目录 03_脱敏副本/ 物理隔离（不得一起存放）。
+    保持相对路径防同名覆盖；返回目标路径，失败返回 None。"""
+    rel = os.path.relpath(path, src_root)
+    dst = os.path.join(local_out_root, rel)
+    os.makedirs(os.path.dirname(dst) or local_out_root, exist_ok=True)
+    try:
+        shutil.copy2(path, dst)
+        return dst
+    except Exception:
+        return None
 
 
 def _mk_skip(path, src_root, category, reason):
@@ -1852,14 +2095,16 @@ def cmd_scan(args):
     total = {}
     cleaning = {}
     skipped = []
-    print("扫描命中（不生成文件）%s%s：" % (
+    print("扫描命中（不生成文件）%s%s%s：" % (
         "[中文增强开启]" if args.cn_enhance else "",
-        " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else ""))
+        " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else "",
+        " [本地处理豁免已启用]" if (args.local_only or args.local_paths) else ""))
     for p in iter_targets(input_path, args.recursive):
         process_file(p, "mask", "", src_root, {}, {}, names, total, do_write=False,
                      patterns=patterns, skipped=skipped,
                      public_manifests=public_manifests, assume_public=args.assume_public,
-                     public_paths=args.public_paths, cleaning=cleaning)
+                     public_paths=args.public_paths, local_only=args.local_only,
+                     local_paths=args.local_paths, cleaning=cleaning)
     if total:
         print("\n汇总：", json.dumps(total, ensure_ascii=False))
     else:
@@ -1872,6 +2117,7 @@ def cmd_scan(args):
 
 def cmd_run(args):
     names = load_names(args.names)
+    custom_map = load_custom_mapping(args.mapping)
     patterns = build_patterns(args.cn_enhance)
     input_path = os.path.abspath(args.input)
     src_root = input_path if os.path.isdir(input_path) else os.path.dirname(input_path)
@@ -1884,6 +2130,9 @@ def cmd_run(args):
             args.keys = os.path.join(ws, WS_KEYS)
     out_root = args.out
     keys_dir = args.keys
+    # 工作区模式：声明「仅本地处理」的文件原样复制到隔离目录（07_本地处理不外发/），
+    # 与可上云目录 03_脱敏副本/ 物理隔离；非工作区模式不复制（仅留痕）。
+    local_out_root = os.path.join(ws, WS_LOCAL_ONLY) if ws else None
     os.makedirs(out_root, exist_ok=True)
 
     # 预处理闸门：若提供了预处理清单且仍有异常，拒绝执行（满足“异常清完再继续”）。
@@ -1914,15 +2163,18 @@ def cmd_run(args):
     cleaning = {}
     skipped = []
     public_manifests = discover_public_manifests(input_path, getattr(args, "public_manifest", None))
-    print("开始脱敏（模式=%s）%s%s..." % (
+    print("开始脱敏（模式=%s）%s%s%s..." % (
         args.mode,
         "[中文增强开启]" if args.cn_enhance else "",
-        " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else ""))
+        " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else "",
+        " [本地处理豁免已启用]" if (args.local_only or args.local_paths) else ""))
     for p in iter_targets(input_path, args.recursive):
         process_file(p, args.mode, out_root, src_root, token_map, mapping, names, total,
                      do_write=True, patterns=patterns, skipped=skipped,
                      public_manifests=public_manifests, assume_public=args.assume_public,
-                     public_paths=args.public_paths, cleaning=cleaning)
+                     public_paths=args.public_paths, local_only=args.local_only,
+                     local_paths=args.local_paths, local_out_root=local_out_root,
+                     cleaning=cleaning, custom_map=custom_map)
     if cleaning:
         print("")
         print("  ⚠ 清洗建议（未清洗数据形态，未自动脱敏，请先清洗再脱敏）：%s" % cleaning)
@@ -2173,7 +2425,7 @@ def cmd_restore(args):
 
 def cmd_audit(args):
     """基于 run 生成的 desensitize_report.json 自动产出审计文档（九节，
-    对齐 SKILL.md 的 11 项上云前自查清单）。"""
+    对齐 SKILL.md 的 12 项上云前自查清单）。"""
     ws = _ws_root(args)
     if ws:
         _ensure_workspace(ws)
@@ -2286,7 +2538,7 @@ def cmd_audit(args):
     L.append("- 异常与待办：%s" % ("无" if not (collisions or skipped_detail)
                                     else "见第六/七节，需人工复核后上云"))
     L.append("")
-    L.append("> 本审计由 `desensitize.py audit` 自动生成；SKILL.md 规定的 11 项上云前自查"
+    L.append("> 本审计由 `desensitize.py audit` 自动生成；SKILL.md 规定的 12 项上云前自查"
              "清单与人工复核仍须由操作人逐项确认，禁止“一键脱敏即上云”。")
 
     out_md = args.out
@@ -2314,7 +2566,7 @@ def cmd_status(args):
     for e in json.load(open(os.path.join(ws, WS_INDEX_JSON), encoding="utf-8"))["entries"]:
         print("  [%-4s] %-22s %s" % (e["tag"], e["name"], e["path"]))
     print("-" * 60)
-    print("仅 `03_脱敏副本/` 可上云；上云前请阅读 `05_上云前自检报告.md` 并完成三处校对。")
+    print("仅 `03_脱敏副本/` 可上云；上云前请阅读 `05_上云前自检报告.md` 并完成四处校对。")
     print("详情见：%s" % os.path.abspath(md))
 
 
@@ -2338,6 +2590,14 @@ def build_parser():
     sp.add_argument("--public-manifest", default=None,
                     help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
                          "默认自动发现输入目录树内的清单（重复使用的高级选项）")
+    sp.add_argument("--local-only", action="store_true",
+                    help="本地处理·无需外发声明：用户已声明本次输入仅本地处理、无需外发，"
+                         "全部跳过脱敏（不脱敏不计数，仅留痕+警示；绝不外发、不得与脱敏副本一起存放）")
+    sp.add_argument("--local-paths", nargs="+", default=None,
+                    help="显式声明仅本地处理的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
+                         "仅本地处理无需脱敏；文件=该文件仅本地处理。与 --public-paths 的区别："
+                         "本地=内容保密但只本地处理（绝不外发）；公开=内容公开（可上云）。"
+                         "仅对本次任务生效（不落盘为永久设置）")
     sp.set_defaults(func=cmd_scan)
 
     rp = sub.add_parser("run", help="脱敏并生成加密映射表")
@@ -2364,6 +2624,19 @@ def build_parser():
     rp.add_argument("--public-manifest", default=None,
                     help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
                          "默认自动发现输入目录树内的清单（重复使用的高级选项）")
+    rp.add_argument("--local-only", action="store_true",
+                    help="本地处理·无需外发声明：用户已声明本次输入仅本地处理、无需外发，"
+                         "全部跳过脱敏（不脱敏不计数，仅留痕+警示；绝不外发、不得与脱敏副本一起存放）")
+    rp.add_argument("--local-paths", nargs="+", default=None,
+                    help="显式声明仅本地处理的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
+                         "仅本地处理无需脱敏；文件=该文件仅本地处理。与 --public-paths 的区别："
+                         "本地=内容保密但只本地处理（绝不外发）；公开=内容公开（可上云）。"
+                         "仅对本次任务生效（不落盘为永久设置）")
+    rp.add_argument("--mapping", default=None,
+                    help="用户自定义脱敏映射文件（原始值→替换值）：JSON {\"原始值\":\"替换值\"} 或"
+                         "文本每行 \"原始值=替换值\"（或 TAB 分隔，# 注释）。命中则优先用用户替换值"
+                         "（原样、不加令牌）。⚠ 该文件含敏感信息（原始值），严禁外传、仅本地使用；"
+                         "命中结果随加密映射表（.desensitize_keys/）本地保存、绝不外发。")
     rp.add_argument("--workspace", default=None,
                     help="统一成果中心（工作区）目录：启用后脱敏副本/映射表/报告等归入一处，"
                          "并自动生成 成果索引 与 上云前自检报告（opt-in，不带则保持原默认行为）")
@@ -2394,7 +2667,7 @@ def build_parser():
                     help="统一成果中心（工作区）目录：回填产物归入工作区并刷新成果索引")
     rp2.set_defaults(func=cmd_restore)
 
-    ap = sub.add_parser("audit", help="基于 run 报告自动生成审计文档（九节，对齐 11 项自查清单）")
+    ap = sub.add_parser("audit", help="基于 run 报告自动生成审计文档（九节，对齐 12 项自查清单）")
     ap.add_argument("--report", default="./desensitize_report.json",
                     help="run 生成的报告（默认 ./desensitize_report.json）")
     ap.add_argument("--out", default="./desensitize_audit.md",
