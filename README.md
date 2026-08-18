@@ -35,8 +35,11 @@
 | 六步脱敏流程 | 识别 → 定方法 → 执行 → 验证 → 审计 → 上云 |
 | 映射表安全 | 重识别钥匙（映射表）与副本**分离 + AES 加密 + 最小权限** |
 | 红线拦截 | 证券/投研内幕信息红线；财务/审计涉密禁传公共 AI；数值「去标识不扭曲」 |
-| 代码密钥扫描 | 账号/密码/API Key/Token/私钥自动扫描与脱敏确认 |
+| 代码密钥扫描 | 账号/密码/API Key/Token/私钥自动扫描与脱敏确认；另识别 **JWT**、**HTML 内嵌密钥**、**SQL INSERT 位置参数口令**（按口令列名定位 VALUES 值）；docx 表格 / xlsx 批注 / GBK 编码文件均已纳入抽取（自动探测 GB18030，中文不乱码） |
+| 清洗建议 | 针对小微业务随意填写：检测分隔/短位手机号、15 位旧身份证、订单号与银行卡区间重叠等**疑似未清洗形态**并输出 `⚠清洗建议`（scan 控制台 + run 报告 `cleaning_advice`）——**只提醒、不自动改**（fail-safe），提示先做字段级数据清洗再脱敏 |
 | 任务后审计 | 自动生成审计汇总（九节，对齐 11 项自查清单；追加至 `desensitize_audit.md`） |
+| 显式声明豁免 | 默认全脱敏；仅当用户显式声明（提示词 `--assume-public` / 指定文件·文件夹 `--public-paths` / `.nodesens` 伴随清单）才跳过，且强制留痕（含 size/sha256）+ "请确认公开"警示；**不做文件名隐式推断**（sample/demo 等不再触发）；scan 仍检测豁免文件并告警。**不再自动识别并豁免公开主体**（上市公司亦有未公开信息，自动豁免易错漏） |
+| 统一成果中心（工作区） | 各阶段加 `--workspace <目录>` 后，全部产物归拢到一处、用**清晰中文目录**命名（`03_脱敏副本/`✅可上云、`02_未脱敏副本/`🚫、`04_映射表_保密/`🚫、`06_审计与回填/` 等）；`run` 自动生成 `05_上云前自检报告.md`（OCR 副本 / 脱敏副本 / 公开豁免留痕**三处校对 + 确认闸门**）与 `成果索引`（可上云/保密标签）；`status --workspace <目录>` 随时回显索引。专为非专业人员设计，**不带 `--workspace` 则完全保持原默认行为**（向后兼容） |
 
 ---
 
@@ -50,7 +53,14 @@ python scripts/desensitize.py scan ./data/ --recursive
 python scripts/desensitize.py run ./data/ \
     --out ./desensitized --keys ./.desensitize_keys --mode hybrid
 
-# 3) 上云：只把 ./desensitized 里的副本发给大模型；.desensitize_keys 永不外传
+# 💡 推荐（非专业人员）：加 --workspace 把全部产物归拢到一处，并自动生成
+#    《上云前自检报告》与《成果索引》，上云前一站式核对：
+python scripts/desensitize.py run ./data/ --workspace ./工作区 --mode hybrid
+#   → 产物在 ./工作区/（03_脱敏副本/ ✅可上云；05_上云前自检报告.md 上云前必读）
+#   → 随时查看：python scripts/desensitize.py status --workspace ./工作区
+
+# 3) 上云：只把脱敏副本（./desensitized 或 ./工作区/03_脱敏副本/）发给大模型；
+#    映射表（.desensitize_keys / ./工作区/04_映射表_保密/）永不外传
 # 4) 任务后审计（基于 run 报告自动生成审计文档：九节，对齐 11 项自查清单）
 python scripts/desensitize.py audit --report ./desensitize_report.json
 
@@ -126,6 +136,47 @@ python3 install.py --skip-venv --skip-tests  # 仅下载技能 + 写常驻规则
 
 > 退出码 `0` = 全部通过；非 `0` = 存在失败项（详见脚本末尾汇总）。
 > Codex / OpenClaw 的记忆文件路径为业界常见约定（`.codex/codex.md` / `.openclaw/AGENTS.md`），如与所用版本不符，可用 `--memory-file` / `--skills-dir` 覆盖。
+
+---
+
+## 升级（手动 · 安全零停机）
+
+技能自带 `upgrade.py`（纯标准库，无第三方依赖），与 `install.py` 同范式（自动检测 AI 工具、定位 `skills/` 目录、从 GitHub 下载、构建 venv、全环实测），并叠加**安全零停机**流程，防止"升级失败导致技能无法调用"：
+
+| 安全阶段 | 说明 |
+|---|---|
+| 1. 下载到暂存区 | 新版本先下载到与线上技能**同一文件系统**的暂存目录；线上技能原封不动、始终可调用 |
+| 2. 校验无误 | 在暂存副本上构建 venv 并跑通 `scan → run → decrypt → restore` 全环实测；任一不过 → **拒绝替换**，线上技能保持不变 |
+| 3. 备份 + 原子替换 | 替换前把当前线上技能改名备份（不删除）；再以原子 `rename` 把暂存新版本落到线上 |
+| 4. 替换后再实测 | 对线上技能再跑一轮全环实测；失败 → **自动回滚**到备份 |
+
+> **手动触发**：升级**默认不自动运行**，由你 / AI Agent 显式调用（仅在用户明确要求升级时执行，绝不在技能加载时自动升级）。
+
+### 运行方式
+
+```bash
+# macOS / Linux
+./upgrade.sh
+# 或 python3 upgrade.py
+
+# Windows (PowerShell)
+.\upgrade.ps1
+# 或 py upgrade.py
+```
+
+### 常用参数
+
+```bash
+python3 upgrade.py                         # 检查更新；有则 下载→校验→应用
+python3 upgrade.py --check                 # 仅检查是否有更新（不下载/不应用）
+python3 upgrade.py --dry-run               # 下载+校验，但不替换（最安全试跑）
+python3 upgrade.py --force                 # 即使版本相同也强制重装（用于修复）
+python3 upgrade.py --source local --local-path /path/to/skill  # 离线/本地源升级
+python3 upgrade.py --clean-backup          # 清理历史备份目录
+```
+
+> 退出码 `0` = 成功 / 已是最新；`1` = 升级失败（已回滚或根本未触碰线上）；`2` = 下载失败；`3` = 参数错误。
+> 升级完成后，按工具提示**重启 / 重载 AI 工具**以加载新技能。
 
 ---
 
@@ -237,10 +288,11 @@ A. 这是在 **Agent 会话内**跑 `install.py` 时才会遇到的环境问题�
 |---|---|
 | 作者 / 维护者 | hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） |
 | 仓库 | https://github.com/hzh-opc/desensitization-sop |
+| 版本 | v2.5.0 · 2026-08-18 ① **移除"公开主体白名单自动豁免"与文件名/目录名哨兵词隐式推断**（`sample`/`demo`/`pub` 等常见命名、"公开"子串、`.public_root` 会被误判为公开而跳过脱敏，违反 fail-safe）；② 改为**显式声明豁免**：默认全脱敏，仅当用户显式声明（提示词 `--assume-public` / 指定文件·文件夹 `--public-paths` / 伴随清单 `.nodesens`·`desensitize_manifest.json`）才跳过，且强制留痕（含 size/sha256）+ "请确认公开"警示，绝不静默跳过；③ **新增统一成果中心（工作区）**：各阶段加 `--workspace` 后产物归拢一处、中文目录命名（`03_脱敏副本/`✅可上云 / `02_未脱敏副本/`🚫 / `04_映射表_保密/`🚫 等），`run` 生成 `05_上云前自检报告.md`（OCR/脱敏/豁免留痕三处校对+确认闸门），`status` 随时回显索引；④ **新增 `upgrade.py`/`upgrade.sh`/`upgrade.ps1` 手动安全升级**（暂存→校验→备份→原子替换→回滚，零停机，绝不自动运行）；⑤ **新增「先清洗再脱敏」提醒机制**（分隔/短位手机、15 位旧证、订单号与银行卡区间重叠等仅提醒不自动改）；⑥ 修复 docx 表格 / xlsx 批注 / GBK 编码 / JWT / HTML 内嵌密钥 / SQL INSERT 位置参数口令等抽取盲区 |
 | 版本 | v2.4.2 · 2026-08-17 ① 目录/文件布局对齐 skill-creator 规范：`desenstool/`→`scripts/`、`reference.md`→`references/reference.md`、SKILL.md 补全 `agent_created: true`；② 功能与 v2.4 一致（`preprocess` 本地预处理关卡：自动解密加密文档（pikepdf / msoffcrypto-tool）+ 纯本地 OCR（rapidocr + onnxruntime，模型随 wheel 捆绑、完全离线），产出确认单（保存/外发清单、OCR 校对提醒、异常清单、run 闸门）；③ PDF 文本抽取由 pdfminer.six 换成 **pypdfium2**（与 OCR 渲染共用一库）；④ Python 版本明确为标准 CPython ≥3.10 且 <3.14；⑤ 全量回归测试通过（详见 `CHANGELOG.md`） |
 | 原始思路 | 《脱敏资料的处理与生成台》 |
 | 许可 | 见仓库根目录 [`LICENSE`](LICENSE)（本项目采用 **Apache License 2.0**，可自由使用、修改、分发；商用须保留版权与许可声明、标注修改、附 NOTICE）；**所引用的国家标准、行业标准以主管部门官方发布文本为准** |
-| 文件结构 | `SKILL.md`：自动加载的执行规范；`references/reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`：跨平台一键安装/卸载；`scripts/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`），数据不出本机 |
+| 文件结构 | `SKILL.md`：自动加载的执行规范；`references/reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`VERSION`：版本唯一来源（install / upgrade 共用）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`/`upgrade.py`/`upgrade.sh`/`upgrade.ps1`：跨平台一键安装 / 卸载 / **手动安全升级**；`scripts/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime`），数据不出本机 |
 
 ---
 
