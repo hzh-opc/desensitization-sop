@@ -73,6 +73,9 @@ RULE_MARKER = "任务执行前通用敏感信息检测闸门"
 # 备份时忽略的项（避免拷贝巨型 venv / 缓存 / 仓库元数据）
 COPY_IGNORE = {".venv", "__pycache__", ".git", "node_modules"}
 
+# 手动升级脚本（upgrade.py）遗留的备份/暂存目录前缀（与技能目录平级，卸载时顺带清理）
+UPGRADE_DIR_PREFIXES = (".desen_bak_", ".desen_stage_")
+
 
 # --------------------------------------------------------------------------- #
 # 辅助函数
@@ -114,6 +117,17 @@ def detect_tool():
 
 def copy_ignore(dir_, names):
     return {n for n in names if n in COPY_IGNORE}
+
+
+def find_upgrade_dirs(skills_dir: Path):
+    """查找升级脚本遗留的备份/暂存目录（.desen_bak_* / .desen_stage_*），按名排序。"""
+    out = []
+    if not skills_dir.exists():
+        return out
+    for p in sorted(skills_dir.iterdir()):
+        if p.is_dir() and p.name.startswith(UPGRADE_DIR_PREFIXES):
+            out.append(p)
+    return out
 
 
 def backup_skill(skill_dir: Path, backup_dir: Path):
@@ -208,6 +222,10 @@ def main():
             log("将删除技能目录：%s（含 %d 项）" % (skill_dir, n), "DRY")
         else:
             log("技能目录不存在，无需删除：%s" % skill_dir, "DRY")
+        up_dirs = find_upgrade_dirs(skills_dir)
+        if up_dirs:
+            log("将顺带清理升级脚本遗留目录（%d 个）：%s"
+                % (len(up_dirs), ", ".join(p.name for p in up_dirs)), "DRY")
         if not args.keep_memory:
             if memory_file.exists() and RULE_MARKER in memory_file.read_text(encoding="utf-8", errors="ignore"):
                 log("将从记忆文件移除常驻规则块：%s" % memory_file, "DRY")
@@ -253,6 +271,16 @@ def main():
     else:
         log("技能目录已不存在，无需删除：%s" % skill_dir, "OK")
 
+    # 2.5) 顺带清理升级脚本遗留的备份/暂存目录（与技能目录平级，不随技能目录删除）
+    up_dirs = find_upgrade_dirs(skills_dir)
+    if up_dirs:
+        for p in up_dirs:
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                log("已清理升级遗留目录：%s" % p.name, "OK")
+            except Exception as e:  # noqa: BLE001
+                log("清理升级遗留目录失败：%s（%s）" % (p.name, e), "WARN")
+
     # 3) 移除记忆中的常驻规则
     banner("步骤 3 / 3 · 移除常驻规则")
     ok, detail = remove_rule(memory_file, skip=args.keep_memory)
@@ -267,6 +295,11 @@ def main():
     else:
         log("技能目录仍存在", "FAIL")
         ok_all = False
+    up_left = find_upgrade_dirs(skills_dir)
+    if up_left:
+        log("仍存在升级遗留目录：%s" % ", ".join(p.name for p in up_left), "WARN")
+    else:
+        log("升级遗留目录已清理（或无）", "OK")
     if not args.keep_memory:
         if memory_file.exists():
             leftover = RULE_MARKER in memory_file.read_text(encoding="utf-8", errors="ignore")
