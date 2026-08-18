@@ -407,8 +407,11 @@ def run_check(py: Path, script: Path, args, **kw):
 
 def verify(skill_dir: Path, py: Path, skip=False):
     """返回 [(名称, 是否通过, 详情), ...]。"""
-    if skip or py is None:
+    if skip:
         return [("脚本实测（已跳过）", True, "通过 --skip-tests")]
+    if py is None:
+        # 无可用解释器：不得静默当作“跳过/通过”（upgrade 依赖此判定拒绝替换不可用版本）
+        return [("脚本实测", False, "无可用 Python 解释器（venv 未就绪），实测未执行")]
 
     script = skill_dir / "scripts" / "desensitize.py"
     if not script.exists():
@@ -417,7 +420,11 @@ def verify(skill_dir: Path, py: Path, skip=False):
     results = []
     tmp = Path(tempfile.mkdtemp(prefix="desen_verify_"))
     try:
-        sample = tmp / "sample.txt"
+        # 自检与豁免启发式解耦：v2.5.0 简化后豁免仅来自 --assume-public / --public-paths
+        # / 伴随清单，不再做任何文件名隐式推断（sample/demo 等命名不再触发豁免）。
+        # 此处额外传 --public-manifest /dev/null 关闭自动清单发现，使校验彻底免疫于
+        # 任何豁免声明（即使环境里恰好存在 .nodesens 也不影响本校验）。
+        sample = tmp / "pii_input.txt"
         sample.write_text(SAMPLE_TEXT, encoding="utf-8")
         names = tmp / "names.txt"
         names.write_text(SAMPLE_NAME + "\n", encoding="utf-8")
@@ -426,7 +433,7 @@ def verify(skill_dir: Path, py: Path, skip=False):
         keys = tmp / ".desensitize_keys"
 
         # 1) scan：脚本能正常运行并识别 PII
-        r = run_check(py, script, ["scan", str(sample)])
+        r = run_check(py, script, ["scan", str(sample), "--public-manifest", os.devnull])
         ok = (r.returncode == 0) and (len(r.stdout.strip()) > 0)
         results.append(("scan 正常运行", ok,
                          "rc=%d，输出 %d 字节" % (r.returncode, len(r.stdout)) if ok
@@ -436,8 +443,8 @@ def verify(skill_dir: Path, py: Path, skip=False):
         r = run_check(py, script,
                       ["run", str(sample), "--mode", "hybrid",
                        "--out", str(des), "--keys", str(keys),
-                       "--names", str(names)])
-        des_file = des / "sample.txt"
+                       "--names", str(names), "--public-manifest", os.devnull])
+        des_file = des / "pii_input.txt"
         masked = des_file.exists() and ("110101199001011234" not in des_file.read_text(encoding="utf-8"))
         has_token = des_file.exists() and ("⟦T" in des_file.read_text(encoding="utf-8"))
         ok = (r.returncode == 0) and masked and has_token
@@ -463,7 +470,7 @@ def verify(skill_dir: Path, py: Path, skip=False):
         r = run_check(py, script,
                       ["restore", "--keys", str(keys),
                        "--input", str(des), "--out", str(restored)])
-        rest_file = restored / "sample.txt"
+        rest_file = restored / "pii_input.txt"
         roundtrip = rest_file.exists() and (rest_file.read_bytes() == sample.read_bytes())
         ok = (r.returncode == 0) and roundtrip
         results.append(("restore 回填闭环", ok,
