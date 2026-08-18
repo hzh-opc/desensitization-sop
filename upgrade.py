@@ -78,8 +78,9 @@ def parse_version(text):
     """把 '2.5.0' 解析为 (2, 5, 0)；解析失败返回 None。"""
     if not text:
         return None
+    text = text.strip().strip('"').strip("'").lstrip("vV")
     parts = []
-    for seg in text.strip().lstrip("vV").split("."):
+    for seg in text.split("."):
         num = ""
         for ch in seg:
             if ch.isdigit():
