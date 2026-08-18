@@ -8,7 +8,7 @@ $Dir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $Py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $Py) { $Py = (Get-Command py -ErrorAction SilentlyContinue).Source }
 if (-not $Py) {
-    Write-Host "[FAIL] 未找到 python / py，请先安装 Python 3.8+ 并将其加入 PATH。" -ForegroundColor Red
+    Write-Host "[FAIL] 未找到 python / py，请先安装 Python 3.10+ 并将其加入 PATH。" -ForegroundColor Red
     exit 1
 }
 
