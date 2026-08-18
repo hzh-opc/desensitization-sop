@@ -12,7 +12,7 @@ dependencies = [
     "python-pptx>=0.6.23",
     "pypdfium2>=4.30",        # PDF 文本抽取 + 页面渲染（Chrome 同款 PDFium）
     "pikepdf>=9.11.0",        # 本地解密 PDF
-    "msoffcrypto-tool>=5.4.2",# 本地解密 Office
+    "msoffcrypto-tool>=6.0.0",# 本地解密 Office
     "rapidocr>=3.9",          # 本地 OCR（模型随 wheel 捆绑，完全离线）
     "onnxruntime>=1.19",      # rapidocr 推理后端
 ]
