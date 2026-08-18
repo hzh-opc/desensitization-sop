@@ -2240,8 +2240,13 @@ def cmd_run(args):
         json.dump(report, f, ensure_ascii=False, indent=2)
 
     print("\n完成。")
-    print("  脱敏副本目录 : %s" % os.path.abspath(out_root))
-    print("  加密映射表   : %s" % enc_info["mapping_file"])
+    if ws:
+        print("  脱敏副本目录 : %s" % os.path.abspath(out_root))
+        print("  加密映射表   : %s" % enc_info["mapping_file"])
+    else:
+        # 非工作区模式：标注中文别名，便于理解与工作区目录的对应关系
+        print("  脱敏副本目录 : %s  （= 工作区模式的 03_脱敏副本/）" % os.path.abspath(out_root))
+        print("  加密映射表   : %s  （= 工作区模式的 04_映射表_保密/）" % enc_info["mapping_file"])
     if enc_info.get("key_file"):
         print("  密钥文件     : %s  (权限 600，请勿与脱敏副本一同上传)" % enc_info["key_file"])
     else:
@@ -2570,76 +2575,118 @@ def cmd_status(args):
     print("详情见：%s" % os.path.abspath(md))
 
 
+# ---------------------------------------------------------------------------
+# guide：流程指引 + 闸门决策表（「一张图看懂流程」在代码里的单一来源）
+# ---------------------------------------------------------------------------
+GUIDE_TEXT = """\
+信息脱敏上云 SOP · 快速指引（desensitize.py）
+
+核心原则：原始文件留本地，只把脱敏副本上云；映射表（重识别钥匙）本地加密、绝不外发。
+
+【闸门决策表】任务执行前先判定（任一项命中即按对应动作）
+  ① 仅本地处理·无需外发 → 不脱敏（三条护栏 + 外发即失效 + 多次外发每次检测）
+  ② 显式声明公开/已脱敏 → 不脱敏（可上云，留痕 + 警示，绝不静默）
+  ③ 检出敏感           → run 脱敏（preprocess→run→自查→上云→审计）
+  ④ 未检出             → 直接执行（零额外负担）
+
+【命令链】推荐顺序
+  preprocess   本地预处理：自动解密加密文档 + rapidocr 识别图片/图片型 PDF → 确认单
+  run          脱敏：生成脱敏副本 + 加密映射表（--workspace 启用一站式中文工作区）
+  status       回显工作区成果索引（可上云 / 保密 / 不外发标签）
+  [上云]       仅上传 03_脱敏副本/（经 05_上云前自检报告 + 确认闸门）
+  audit        基于报告自动生成审计文档（对齐 12 项自查清单）
+  decrypt      本地解密映射表复核可逆性（无需上云）
+  restore      用映射表把脱敏副本回填为含原值内部文档（生成工资单等实名交付物）
+
+【7 个子命令】
+  scan         仅扫描报告命中（不生成文件）
+  preprocess   预处理关卡（解密 / OCR + 确认单）
+  run          脱敏 + 加密映射表（核心，默认 hybrid 模式）
+  status       回显工作区索引
+  audit        自动审计文档
+  decrypt      解密映射表（本地复核）
+  restore      回填为实名内部文档
+
+【快速开始】
+  # 推荐：一站式工作区（中文目录 + 上云前自检报告）
+  desensitize.py run ./data/ --workspace ./工作区 --mode hybrid
+  desensitize.py status --workspace ./工作区
+
+  # 极简：非工作区（默认 ./desensitized + ./.desensitize_keys）
+  desensitize.py scan ./data/ --recursive
+  desensitize.py run ./data/ --mode hybrid
+"""
+
+
+def cmd_guide(args):
+    print(GUIDE_TEXT)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="一键脱敏本地脚本（数据不出本机）")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("scan", help="扫描并报告敏感字段命中（不生成文件）")
     sp.add_argument("input", help="文件或目录")
-    sp.add_argument("--recursive", action="store_true", help="递归处理目录")
-    sp.add_argument("--names", help="已知姓名清单文件（每行一个）")
-    sp.add_argument("--cn-enhance", action="store_true",
-                    help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
-    sp.add_argument("--assume-public", action="store_true",
-                    help="提示词声明：用户已声明本次输入整体为公开/样例/已脱敏，全部跳过脱敏"
-                         "（仅留痕+警示，不脱敏不计数）")
-    sp.add_argument("--public-paths", nargs="+", default=None,
-                    help="显式声明公开的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
-                         "无需脱敏；文件=该文件无需脱敏。替代隐蔽的文件名哨兵/隐藏标记，"
-                         "仅对本次任务生效（不落盘为永久设置）")
-    sp.add_argument("--public-manifest", default=None,
-                    help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
-                         "默认自动发现输入目录树内的清单（重复使用的高级选项）")
-    sp.add_argument("--local-only", action="store_true",
-                    help="本地处理·无需外发声明：用户已声明本次输入仅本地处理、无需外发，"
-                         "全部跳过脱敏（不脱敏不计数，仅留痕+警示；绝不外发、不得与脱敏副本一起存放）")
-    sp.add_argument("--local-paths", nargs="+", default=None,
-                    help="显式声明仅本地处理的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
-                         "仅本地处理无需脱敏；文件=该文件仅本地处理。与 --public-paths 的区别："
-                         "本地=内容保密但只本地处理（绝不外发）；公开=内容公开（可上云）。"
-                         "仅对本次任务生效（不落盘为永久设置）")
+    g = sp.add_argument_group("核心参数")
+    g.add_argument("--recursive", action="store_true", help="递归处理目录")
+    g = sp.add_argument_group("识别增强")
+    g.add_argument("--names", help="已知姓名清单文件（每行一个）")
+    g.add_argument("--cn-enhance", action="store_true",
+                   help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
+    g = sp.add_argument_group("豁免声明（用户显式声明才跳过脱敏，默认全脱敏）")
+    g.add_argument("--assume-public", action="store_true",
+                   help="整体声明公开/样例/已脱敏，全部跳过脱敏（仅留痕+警示，不脱敏不计数）")
+    g.add_argument("--public-paths", nargs="+", default=None,
+                   help="指定公开文件/文件夹路径（可多个）：文件夹=其下全部（递归）无需脱敏；"
+                        "文件=该文件无需脱敏；仅本次任务生效（不落盘为永久设置）")
+    g.add_argument("--public-manifest", default=None,
+                   help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
+                        "默认自动发现输入目录树内的清单（重复使用的高级选项）")
+    g.add_argument("--local-only", action="store_true",
+                   help="整体声明仅本地处理·无需外发，全部跳过脱敏（仅留痕+警示；绝不外发）")
+    g.add_argument("--local-paths", nargs="+", default=None,
+                   help="指定仅本地处理的文件/文件夹路径（可多个）：文件夹=其下全部（递归）；"
+                        "内容保密但只本地处理、绝不外发；仅本次任务生效")
     sp.set_defaults(func=cmd_scan)
 
-    rp = sub.add_parser("run", help="脱敏并生成加密映射表")
+    rp = sub.add_parser("run", help="脱敏并生成加密映射表（核心命令，默认 hybrid 模式）")
     rp.add_argument("input", help="文件或目录")
-    rp.add_argument("--out", default="./desensitized", help="脱敏副本输出目录（默认 ./desensitized）")
-    rp.add_argument("--keys", default="./.desensitize_keys", help="加密映射表目录（默认 ./.desensitize_keys）")
-    rp.add_argument("--mode", choices=["mask", "token", "redact", "hybrid"], default="hybrid",
-                    help="脱敏模式（默认 hybrid）：mask=掩码(可逆) / token=令牌化(可逆,跨记录关联) / "
-                         "hybrid=语义掩码+唯一令牌(可逆,无歧义,保留字段语义) / redact=抑制(不可逆)")
-    rp.add_argument("--passphrase", default=None, help="用口令派生密钥（密钥不落盘）")
-    rp.add_argument("--recursive", action="store_true", help="递归处理目录")
-    rp.add_argument("--names", help="已知姓名清单文件（每行一个）")
-    rp.add_argument("--cn-enhance", action="store_true",
-                    help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
-    rp.add_argument("--preprocess-manifest", default=None,
-                    help="预处理清单 JSON；若仍含异常则拒绝执行 run（异常清完再继续）")
-    rp.add_argument("--assume-public", action="store_true",
-                    help="提示词声明：用户已声明本次输入整体为公开/样例/已脱敏，全部跳过脱敏"
-                         "（仅留痕+警示，不脱敏不计数）")
-    rp.add_argument("--public-paths", nargs="+", default=None,
-                    help="显式声明公开的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
-                         "无需脱敏；文件=该文件无需脱敏。替代隐蔽的文件名哨兵/隐藏标记，"
-                         "仅对本次任务生效（不落盘为永久设置）")
-    rp.add_argument("--public-manifest", default=None,
-                    help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
-                         "默认自动发现输入目录树内的清单（重复使用的高级选项）")
-    rp.add_argument("--local-only", action="store_true",
-                    help="本地处理·无需外发声明：用户已声明本次输入仅本地处理、无需外发，"
-                         "全部跳过脱敏（不脱敏不计数，仅留痕+警示；绝不外发、不得与脱敏副本一起存放）")
-    rp.add_argument("--local-paths", nargs="+", default=None,
-                    help="显式声明仅本地处理的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
-                         "仅本地处理无需脱敏；文件=该文件仅本地处理。与 --public-paths 的区别："
-                         "本地=内容保密但只本地处理（绝不外发）；公开=内容公开（可上云）。"
-                         "仅对本次任务生效（不落盘为永久设置）")
-    rp.add_argument("--mapping", default=None,
-                    help="用户自定义脱敏映射文件（原始值→替换值）：JSON {\"原始值\":\"替换值\"} 或"
-                         "文本每行 \"原始值=替换值\"（或 TAB 分隔，# 注释）。命中则优先用用户替换值"
-                         "（原样、不加令牌）。⚠ 该文件含敏感信息（原始值），严禁外传、仅本地使用；"
-                         "命中结果随加密映射表（.desensitize_keys/）本地保存、绝不外发。")
-    rp.add_argument("--workspace", default=None,
-                    help="统一成果中心（工作区）目录：启用后脱敏副本/映射表/报告等归入一处，"
-                         "并自动生成 成果索引 与 上云前自检报告（opt-in，不带则保持原默认行为）")
+    g = rp.add_argument_group("核心参数")
+    g.add_argument("--out", default="./desensitized", help="脱敏副本输出目录（默认 ./desensitized，可上云）")
+    g.add_argument("--keys", default="./.desensitize_keys", help="加密映射表目录（默认 ./.desensitize_keys，绝不外发）")
+    g.add_argument("--mode", choices=["mask", "token", "redact", "hybrid"], default="hybrid",
+                   help="脱敏模式（默认 hybrid）：mask=掩码(可逆) / token=令牌化(可逆,跨记录关联) / "
+                        "hybrid=语义掩码+唯一令牌(可逆,无歧义,保留字段语义) / redact=抑制(不可逆)")
+    g.add_argument("--recursive", action="store_true", help="递归处理目录")
+    g.add_argument("--workspace", default=None,
+                   help="统一成果中心（工作区）目录（推荐）：产物归拢一处、中文目录命名，"
+                        "自动生成 成果索引 与 上云前自检报告（opt-in，不带则用非工作区默认路径）")
+    g = rp.add_argument_group("识别增强")
+    g.add_argument("--names", help="已知姓名清单文件（每行一个）")
+    g.add_argument("--cn-enhance", action="store_true",
+                   help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
+    g = rp.add_argument_group("豁免声明（用户显式声明才跳过脱敏，默认全脱敏）")
+    g.add_argument("--assume-public", action="store_true",
+                   help="整体声明公开/样例/已脱敏，全部跳过脱敏（仅留痕+警示，不脱敏不计数）")
+    g.add_argument("--public-paths", nargs="+", default=None,
+                   help="指定公开文件/文件夹路径（可多个）：文件夹=其下全部（递归）无需脱敏；"
+                        "文件=该文件无需脱敏；仅本次任务生效")
+    g.add_argument("--public-manifest", default=None,
+                   help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）")
+    g.add_argument("--local-only", action="store_true",
+                   help="整体声明仅本地处理·无需外发，全部跳过脱敏（仅留痕+警示；绝不外发）")
+    g.add_argument("--local-paths", nargs="+", default=None,
+                   help="指定仅本地处理的文件/文件夹路径（可多个）：文件夹=其下全部（递归）；"
+                        "内容保密但只本地处理、绝不外发；仅本次任务生效")
+    g = rp.add_argument_group("高级")
+    g.add_argument("--passphrase", default=None, help="用口令派生密钥（密钥不落盘）")
+    g.add_argument("--preprocess-manifest", default=None,
+                   help="预处理清单 JSON；若仍含异常则拒绝执行 run（异常清完再继续）")
+    g.add_argument("--mapping", default=None,
+                   help="用户自定义脱敏映射文件（原始值→替换值）：JSON 或文本每行 原始值=替换值；"
+                        "命中优先用用户替换值；⚠ 该文件含原始值，严禁外传、仅本地使用，"
+                        "命中结果随加密映射表本地保存、绝不外发")
     rp.set_defaults(func=cmd_run)
 
     dp = sub.add_parser("decrypt", help="解密映射表，供本地复核可逆性（不依赖上云）")
@@ -2697,6 +2744,9 @@ def build_parser():
     st = sub.add_parser("status", help="回显工作区成果索引（一站式查看全部产物位置与可上云状态）")
     st.add_argument("--workspace", required=True, help="工作区目录（由 preprocess/run 的 --workspace 指定）")
     st.set_defaults(func=cmd_status)
+
+    gd = sub.add_parser("guide", help="打印流程指引与闸门决策表（一张图看懂流程）")
+    gd.set_defaults(func=cmd_guide)
     return p
 
 

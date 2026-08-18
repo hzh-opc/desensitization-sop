@@ -49,6 +49,9 @@
 ## 快速上手
 
 ```bash
+# 0) 快速指引：一张图看懂流程（闸门决策表 + 命令链）
+python scripts/desensitize.py guide
+
 # 1) 扫描：看看本地文件里有哪些敏感字段（不生成任何文件）
 python scripts/desensitize.py scan ./data/ --recursive
 
@@ -72,7 +75,7 @@ python scripts/desensitize.py decrypt --keys ./.desensitize_keys
 python scripts/desensitize.py restore --keys ./.desensitize_keys --input ./desensitized --out ./restored
 ```
 
-> 子命令：`scan`（报告命中）/ `run`（脱敏+映射表）/ `decrypt`（本地解密映射表）/ `restore`（回填为含原值内部文档）/ `audit`（自动审计文档）。
+> 子命令：`guide`（流程指引+决策表）/ `scan`（报告命中）/ `preprocess`（解密+OCR+确认单）/ `run`（脱敏+映射表）/ `status`（回显工作区索引）/ `decrypt`（本地解密映射表）/ `restore`（回填为含原值内部文档）/ `audit`（自动审计文档）。
 > 脱敏模式默认 `hybrid`（语义掩码+唯一令牌，无歧义恢复且保留字段语义）；另有 `mask` / `token` / `redact`。
 > 中文识别增强：`--cn-enhance`（本地离线，识别中文姓名/地址/机构名）。详见下方「文档导航」。
 
@@ -291,6 +294,7 @@ A. 这是在 **Agent 会话内**跑 `install.py` 时才会遇到的环境问题�
 |---|---|
 | 作者 / 维护者 | hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） |
 | 仓库 | https://github.com/hzh-opc/desensitization-sop |
+| 版本 | v2.7.0 · 2026-08-18 **结构重构 + 用户体验优化（A+B+C 全面梳理）**：① 新增 `guide` 子命令（内置闸门决策表 + 命令链「一张图看懂流程」，代码单一来源 `GUIDE_TEXT`）；② argparse 参数分组（核心/识别增强/豁免声明/高级），`--help` 更清晰；③ 非工作区输出加中文别名标注（`desensitized/` = `03_脱敏副本/`、`.desensitize_keys/` = `04_映射表_保密/`）；④ SKILL.md 重构：顶部加「一张图看懂流程」决策表、两个豁免章节合并为「豁免与边界」、动作一/二（自查/审计）提前、264→179 行瘦身、12 项清单↔九节审计数字对齐说明；⑤ reference.md §0 加决策表 + 数字对齐说明；⑥ 测试套件新增 `run_all.sh` 统一入口 |
 | 版本 | v2.6.0 · 2026-08-18 **新增「本地处理·无需外发豁免」**：仅本地处理、无需外发的信息（数据不出本机；或云端取「方法」本地处理「数据」）**不脱敏**——省工作量、免精度损失。三条护栏：合理访问权限 / 无外泄风险 / **不得与外发脱敏副本一起存放**（工作区自动隔离到 `07_本地处理不外发/`🚫）；**豁免以「不外发」为前提——本地处理中追加/生成的数据如需外发须重新检验脱敏（外发即失效；多次外发每次检测+记录，已脱敏沿用原记录、未脱敏补充记录再外发）**。工具新增 `--local-only`（整体声明）/ `--local-paths`（指定文件·文件夹），报告留痕（含 size/sha256）+ 警示，**本地处理优先于公开**、scan 仍检测（fail-safe）。上云前自查清单 11 项→12 项、自检报告三处校对→四处校对。修复 `import hashlib` 缺失导致豁免留痕 sha256 恒为 None 的既有缺陷。另：**生僻字/特殊字符优先 mask**（含生僻字（CJK 扩展区/兼容区）或特殊字符（emoji 等非常见字符）的字段全掩码、不保留首字/尾字，替换值用常见字符；基本区罕见字需人工复核）；**用户自定义脱敏映射 `--mapping`**（用户指定「原始值→替换值」，主动精确替换、加密入库不外发） |
 | 版本 | v2.5.0 · 2026-08-18 ① **移除"公开主体白名单自动豁免"与文件名/目录名哨兵词隐式推断**（`sample`/`demo`/`pub` 等常见命名、"公开"子串、`.public_root` 会被误判为公开而跳过脱敏，违反 fail-safe）；② 改为**显式声明豁免**：默认全脱敏，仅当用户显式声明（提示词 `--assume-public` / 指定文件·文件夹 `--public-paths` / 伴随清单 `.nodesens`·`desensitize_manifest.json`）才跳过，且强制留痕（含 size/sha256）+ "请确认公开"警示，绝不静默跳过；③ **新增统一成果中心（工作区）**：各阶段加 `--workspace` 后产物归拢一处、中文目录命名（`03_脱敏副本/`✅可上云 / `02_未脱敏副本/`🚫 / `04_映射表_保密/`🚫 等），`run` 生成 `05_上云前自检报告.md`（OCR/脱敏/豁免留痕四处校对+确认闸门），`status` 随时回显索引；④ **新增 `upgrade.py`/`upgrade.sh`/`upgrade.ps1` 手动安全升级**（暂存→校验→备份→原子替换→回滚，零停机，绝不自动运行）；⑤ **新增「先清洗再脱敏」提醒机制**（分隔/短位手机、15 位旧证、订单号与银行卡区间重叠等仅提醒不自动改）；⑥ 修复 docx 表格 / xlsx 批注 / GBK 编码 / JWT / HTML 内嵌密钥 / SQL INSERT 位置参数口令等抽取盲区 |
 | 版本 | v2.4.2 · 2026-08-17 ① 目录/文件布局对齐 skill-creator 规范：`desenstool/`→`scripts/`、`reference.md`→`references/reference.md`、SKILL.md 补全 `agent_created: true`；② 功能与 v2.4 一致（`preprocess` 本地预处理关卡：自动解密加密文档（pikepdf / msoffcrypto-tool）+ 纯本地 OCR（rapidocr + onnxruntime，模型随 wheel 捆绑、完全离线），产出确认单（保存/外发清单、OCR 校对提醒、异常清单、run 闸门）；③ PDF 文本抽取由 pdfminer.six 换成 **pypdfium2**（与 OCR 渲染共用一库）；④ Python 版本明确为标准 CPython ≥3.10 且 <3.14；⑤ 全量回归测试通过（详见 `CHANGELOG.md`） |
