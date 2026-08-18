@@ -72,6 +72,7 @@ onnxruntime 目前不提供 free-threaded wheel，3.14 支持亦未完备，
 """
 
 import argparse
+import fnmatch
 import glob
 import json
 import os
@@ -108,6 +109,9 @@ PATTERNS = {
     "email": re.compile(_BOUND_L + r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" + _BOUND_R),
     "plate": re.compile(_BOUND_L + r"[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][A-Z0-9]{5,6}" + _BOUND_R),
     "passport": re.compile(_BOUND_L + r"[EGDSH]\d{8}" + _BOUND_R + r"|" + _BOUND_L + r"[a-zA-Z]\d{9}" + _BOUND_R),
+    # JWT（JSON Web Token）：eyJ 开头、三段 base64url。日志/配置中高频明文泄漏点，
+    # 特征极强（eyJ 前缀 + 三段点分隔），误报风险低，对所有文本生效。
+    "jwt": re.compile(_BOUND_L + r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}" + _BOUND_R),
 }
 
 # ---------------------------------------------------------------------------
@@ -195,8 +199,52 @@ SECRET_PATTERN = re.compile(
     r"""(?i)(['"]?)(?:api[_-]?key|secret|token|password|passwd|access[_-]?key|private[_-]?key|auth)['"]?\s*[:=]\s*(?P<val>'[^']{4,}'|"[^"]{4,}"|[^\s'"]{4,})"""
 )
 
+# SQL INSERT 位置参数口令启发式：数据库 dump 中口令常以
+#   INSERT INTO users (..., password, ...) VALUES (..., 'secret_pass_123', ...)
+# 位置参数形式出现，值前无 password= 前缀，SECRET_PATTERN 无法捕获。
+# 此处按"列名含口令关键词 → 对应位置值"定位并脱敏（列名缺失/解析失败时静默跳过）。
+_SQL_INS_RE = re.compile(
+    r"INSERT\s+INTO\s+[^\s(;]+(?:\s*\(([^)]*)\))?\s*VALUES\s*\(([^)]*)\)",
+    re.I | re.S)
+_SQL_SECRET_COL = re.compile(
+    r"(?:passwd|password|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth)",
+    re.I)
+
+
+def _sql_insert_secret_values(text):
+    """返回 [(带引号原值, 纯净值)]：INSERT ... (含口令列) VALUES 中对应位置的值。
+
+    用 csv 解析 VALUES（正确处理引号内逗号）；列名缺失（INSERT INTO t VALUES ...）
+    时无法定位口令列，跳过（保守，避免误伤）。"""
+    import csv
+    import io
+    out = []
+    for m in _SQL_INS_RE.finditer(text):
+        cols_str, vals_str = m.group(1), m.group(2)
+        if not cols_str:
+            continue
+        cols = [c.strip().strip('`"[]') for c in cols_str.split(",")]
+        try:
+            vals = next(csv.reader(io.StringIO(vals_str)))
+        except Exception:
+            continue
+        for i, col in enumerate(cols):
+            if i >= len(vals):
+                break
+            if _SQL_SECRET_COL.search(col):
+                v = vals[i].strip()
+                if len(v) >= 4:
+                    inner = (v[1:-1] if len(v) >= 2 and v[0] in "'\"" and v[-1] == v[0]
+                             else v)
+                    if inner:
+                        out.append((v, inner))
+    return out
+
 CODE_EXTS = {".py", ".js", ".ts", ".go", ".java", ".c", ".cpp", ".rb", ".php",
               ".yml", ".yaml", ".toml", ".env", ".ini", ".sh", ".sql"}
+# 密钥检测扩展：HTML 页面内嵌的 <script> 中常见 adminToken/secret 等赋值，
+# 是真实高频泄漏点，故 html/htm 一并启用 SECRET_PATTERN 密钥检测（分类仍属 TEXT）。
+SECRET_EXTS = CODE_EXTS | {".html", ".htm"}
 TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".json", ".log", ".xml", ".html",
              ".htm", ".rst", ".eml"}
 # 二进制/库文件：抽取文本后再脱敏（抽取库缺失时跳过并告警，不崩溃）
@@ -228,13 +276,314 @@ WARN_IMAGE = ("⚠️ 严禁外传：原始图片/图片型PDF，以及 OCR 识�
 WARN_GENERIC = ("⚠️ 该文件未经处理，上云前须先本地转为文本/OCR/解密或确认不含敏感信息；"
                 "原始文件与未脱敏文件均不得直接外传。")
 
+# ---------------------------------------------------------------------------
+# 数据清洗建议（提醒"先清洗再脱敏"）
+# 小微企业的数据填写/传递往往随意：手机号带空格/横线、少一位、15 位旧身份证、
+# 订单号/流水号与银行卡区间重叠等。这些形态要么漏检、要么误报，
+# 脚本不强行处理（避免误伤），而是检测并**明确提醒**用户先做字段级清洗/确认。
+# 清洗建议只提示、不脱敏（fail-safe：宁可提醒也不静默放过）。
+# ---------------------------------------------------------------------------
+MESSY_PATTERNS = {
+    # 带分隔符的手机号（138-0013-8004 / 138 0013 8002 / +86 138 0013 8003）
+    "messy_phone_sep": re.compile(
+        r"(?<![0-9A-Za-z])(?:\+?86[-\s]?)?1[3-9]\d[-\s]\d{3,4}[-\s]\d{3,4}(?!\d)"),
+    # 10 位手机号（少一位，录错/占位常见）
+    "messy_phone_short": re.compile(r"(?<![0-9A-Za-z])1[3-9]\d{8}(?![0-9A-Za-z])"),
+    # 15 位旧身份证（1999 年前签发，老员工/旧单存量）
+    "messy_id15": re.compile(
+        r"(?<![0-9A-Za-z])[1-9]\d{5}\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}(?![0-9A-Za-z])"),
+    # 订单号/流水号/计划ID 标签后紧跟 16-19 位纯数字（与银行卡区间重叠，易误判）
+    "messy_order_like": re.compile(
+        r"(?:订单号|订单编号|单号|流水号|计划\s*ID|编号|单据号)[:：=\s]{0,4}\d{16,19}"),
+}
+CLEANING_ADVICE_TEXT = (
+    "⚠️ 清洗建议：检测到疑似「未清洗/不规范」数据形态（带分隔符或短位手机号、"
+    "15 位旧身份证、订单号/流水号与银行卡区间重叠等）。上述形态未被自动脱敏或可能被误判，"
+    "请先做字段级数据清洗（去空格/横线、补齐位数、区分订单号与银行卡）后再脱敏，"
+    "或人工复核确认。切勿在未清洗状态下直接上云。")
+
+
+def _find_cleaning_advice(text):
+    """检测疑似未清洗数据形态，返回 {类别: 出现次数}（不脱敏，仅提醒）。"""
+    return {k: len(p.findall(text)) for k, p in MESSY_PATTERNS.items()
+            if p.findall(text)}
+
+
 # 预处理/脱敏流程自身产出的元数据文件（不含业务敏感信息，run 时须跳过、不可当作业务文本脱敏）
 META_SKIP = {
     "desensitize_preprocess.json",
     "desensitize_preprocess_summary.md",
     "desensitize_report.json",
     "desensitize_audit.md",
+    # 工作区（统一成果中心）自带的索引/说明文件，非业务数据，须跳过
+    "成果索引.json",
+    "成果索引.md",
+    "00_使用说明.md",
+    "05_上云前自检报告.md",
+    # 以下为“公开声明”机制的伴随清单控制文件，本身非业务数据，须跳过
+    ".nodesens",
+    "desensitize_manifest.json",
 }
+
+# ---------------------------------------------------------------------------
+# 统一成果中心（工作区，opt-in：仅当命令带 --workspace 才启用）
+# 目的：把分散在各阶段的产物归拢到一处、用清晰中文目录命名、附“可上云/保密”
+#       标签索引与上云前自检报告，方便非专业人员一站式查阅与核对。
+# 不带 --workspace 时，各命令保持原默认行为（向后兼容，不影响 install 自检）。
+# ---------------------------------------------------------------------------
+WS_README = "00_使用说明.md"
+WS_PREPROC_SUMMARY = "01_预处理确认单.md"
+WS_UNDESEN = "02_未脱敏副本"
+WS_READY = "02_未脱敏副本/解密与原始副本"
+WS_OCR = "02_未脱敏副本/OCR待校对"
+WS_DESEN = "03_脱敏副本"
+WS_KEYS = "04_映射表_保密"
+WS_SELFCHECK = "05_上云前自检报告.md"
+WS_AUDIT = "06_审计与回填/审计记录.md"
+WS_RESTORE = "06_审计与回填/回填成果"
+WS_INDEX_JSON = "成果索引.json"
+WS_INDEX_MD = "成果索引.md"
+
+
+def _ws_root(args):
+    """返回工作区绝对路径；未指定 --workspace 则返回 None。"""
+    ws = getattr(args, "workspace", None)
+    return os.path.abspath(ws) if ws else None
+
+
+def _ensure_workspace(ws):
+    """确保工作区目录存在，并在首次创建时写入使用说明。"""
+    os.makedirs(ws, exist_ok=True)
+    readme = os.path.join(ws, WS_README)
+    if not os.path.exists(readme):
+        _write_workspace_readme(readme, ws)
+    return ws
+
+
+def _write_workspace_readme(path, ws):
+    L = [
+        "# 脱敏工作区 · 使用说明",
+        "",
+        "本目录由「信息脱敏上云 SOP」自动整理，汇聚本次任务全部阶段性成果，方便你一站式查阅。",
+        "",
+        "## 目录含义与「能否上云」",
+        "",
+        "| 目录 / 文件 | 能否上云 | 含义 |",
+        "| --- | --- | --- |",
+        "| `03_脱敏副本/` | ✅ **可上云** | 已脱敏、可送云端模型处理的副本（唯一允许上传的目录） |",
+        "| `02_未脱敏副本/` | 🚫 保密 | 原始 / 解密 / OCR 文本等未脱敏材料，**严禁外传** |",
+        "| `04_映射表_保密/` | 🚫 保密 | 加密映射表（重识别钥匙），**绝不随副本上传** |",
+        "| `06_审计与回填/回填成果/` | 🚫 保密 | 回填后的含原值内部文档，勿随副本外传 |",
+        "| `01_预处理确认单.md` | 内部 | 预处理确认：外发清单、OCR 校对、异常、确认闸门 |",
+        "| `05_上云前自检报告.md` | 内部 | **上云前必读**：三处校对提醒 + 确认闸门 |",
+        "| `06_审计与回填/审计记录.md` | 内部 | 对齐 11 项自查清单的审计文档 |",
+        "| `成果索引.json` / `成果索引.md` | 内部 | 本索引，随时查看全部产物位置 |",
+        "",
+        "## 上云前必做（按顺序）",
+        "1. 阅读 `05_上云前自检报告.md`；",
+        "2. 校对 `02_未脱敏副本/OCR待校对/` 的 OCR 文本（逐字）；",
+        "3. 抽查 `03_脱敏副本/` 脱敏是否到位、是否误伤业务；",
+        "4. 确认无误后，由 AI Agent 在你明确「确认上云」后才上传 `03_脱敏副本/`。",
+        "",
+        "> 红线：原始敏感文件、未脱敏副本、映射表永远留本地，绝不整份上传。",
+        "> 自动化识别非 100%（中文尤弱），禁止「一键脱敏即上云」，必须人工复核。",
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+
+
+def _refresh_index(ws):
+    """扫描工作区已知产物，生成 成果索引.json + 成果索引.md（幂等、自愈）。"""
+    def _exists(rel):
+        return os.path.exists(os.path.join(ws, rel))
+    entries = []
+    def _add(name, rel, tag, desc):
+        if _exists(rel):
+            entries.append({"name": name, "path": os.path.abspath(os.path.join(ws, rel)),
+                            "tag": tag, "desc": desc})
+    _add("预处理确认单", WS_PREPROC_SUMMARY, "内部", "外发清单、OCR 校对、异常清单、确认闸门")
+    _add("未脱敏副本·解密与原始", WS_READY, "保密", "严禁上云：已解密未脱敏副本、原可直接处理文件")
+    _add("未脱敏副本·OCR 待校对", WS_OCR, "保密", "严禁上云：OCR 识别文本，须逐字校对")
+    _add("脱敏副本", WS_DESEN, "可上云", "★唯一允许上传云端的目录")
+    _add("映射表", WS_KEYS, "保密", "重识别钥匙，绝不随副本上传")
+    _add("上云前自检报告", WS_SELFCHECK, "内部", "三处校对提醒 + 确认闸门，上云前必读")
+    _add("审计记录", WS_AUDIT, "内部", "对齐 11 项自查清单的审计文档")
+    _add("回填成果", WS_RESTORE, "保密", "含原值内部文档，勿随副本外传")
+    idx = {"workspace": os.path.abspath(ws),
+           "generated": datetime.now().isoformat(timespec="seconds"),
+           "entries": entries}
+    with open(os.path.join(ws, WS_INDEX_JSON), "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=2)
+    L = ["# 脱敏工作区 · 成果索引", "",
+         "- 工作区：`%s`" % os.path.abspath(ws),
+         "- 生成时间：%s" % idx["generated"], "",
+         "## 各阶段成果（按可上云状态标注）", "",
+         "| 阶段 / 产物 | 可上云状态 | 路径 | 说明 |",
+         "| --- | --- | --- | --- |"]
+    for e in entries:
+        L.append("| %s | **%s** | `%s` | %s |" % (e["name"], e["tag"], e["path"], e["desc"]))
+    L.append("")
+    L.append("> 仅 `03_脱敏副本/` 可上云；`02_未脱敏副本/`、`04_映射表_保密/`、`06_审计与回填/回填成果/` 均须留本地。")
+    L.append("> 上云前请先阅读 `05_上云前自检报告.md` 并完成三处校对。")
+    with open(os.path.join(ws, WS_INDEX_MD), "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+
+
+def _write_selfcheck_report(ws, rep, ocr_dir):
+    """生成《上云前自检报告》：汇总 OCR 副本 / 脱敏副本 / 公开豁免留痕，并设确认闸门。"""
+    out = os.path.join(ws, WS_SELFCHECK)
+    counts = rep.get("counts", {}) or {}
+    mode = rep.get("mode", "")
+    safety = rep.get("restoration_safety", "")
+    mapping = rep.get("mapping_encrypted", "")
+    keyf = rep.get("key_file") or "（由 --passphrase 派生，salt 存于密钥目录）"
+    skipped_detail = rep.get("skipped_detail", []) or []
+    ocr_list = []
+    if ocr_dir and os.path.isdir(ocr_dir):
+        for root, _, files in os.walk(ocr_dir):
+            for fn in files:
+                ocr_list.append(os.path.join(root, fn))
+    L = ["# 上云前自检报告（务必阅读并校对后再上云）", "",
+         "- 生成时间：%s" % datetime.now().isoformat(timespec="seconds"),
+         "- 脱敏模式：%s（恢复安全性：%s）" % (mode, safety),
+         "- 命中统计：%s" % (json.dumps(counts, ensure_ascii=False) if counts else "无"),
+         "", "## 一、请校对：OCR 待校对副本（未脱敏，严禁上云）",
+         "位置：`02_未脱敏副本/OCR待校对/`", ""]
+    if ocr_list:
+        for p in ocr_list:
+            L.append("- `%s`" % os.path.abspath(p))
+        L.append("")
+        L.append("> ⚠ 请逐字核对上述 OCR 文本，重点：姓名 / 证件号 / 银行卡 / 金额。OCR 可能误识、漏识，")
+        L.append("> 确认无误后再脱敏；如发现错误，请指出以便补充 / 修正，勿直接上云。")
+    else:
+        L.append("- 本次无 OCR 产物，跳过。")
+    L.append("")
+    L.append("## 二、请复核：脱敏副本（★可上云）")
+    L.append("位置：`03_脱敏副本/`")
+    L.append("")
+    L.append("> 请抽查脱敏是否到位（敏感字段已被替换），同时确认未误伤业务实质内容。")
+    L.append("> 仅此目录可上传云端。")
+    L.append("")
+    L.append("## 三、公开声明豁免留痕（如适用）")
+    pub = [d for d in skipped_detail if d.get("category") == "public_declared"]
+    if pub:
+        for d in pub:
+            L.append("- `%s` — %s" % (d.get("file"), d.get("reason", "")))
+        L.append("")
+        L.append("> ⚠ 上述文件经你声明为公开而跳过脱敏。请再次确认确为公开信息；误声明会导致敏感外传。")
+    else:
+        L.append("- 本次无公开声明豁免。")
+    L.append("")
+    L.append("## 四、映射表（重识别钥匙 · 保密）")
+    L.append("- 加密映射表：`%s`" % mapping)
+    L.append("- 密钥：`%s`（权限 600）" % keyf)
+    L.append("> 映射表与副本须分离、加密、最小权限；**绝不随副本上传**。")
+    L.append("")
+    L.append("## 五、确认闸门（上云前必须完成）")
+    L.append("请在上传云端前，确认以下三项均已完成：")
+    L.append("1. ✅ 已逐字校对 OCR 待校对副本（第一节）；")
+    L.append("2. ✅ 已抽查脱敏副本脱敏到位、未误伤业务（第二节）；")
+    L.append("3. ✅ 已阅读本报告、确认公开豁免留痕无误（第三、四节）。")
+    L.append("")
+    L.append("> **确认方式**：请明确回复「确认上云」。AI Agent 收到后才会将 `03_脱敏副本/` 上传云端；")
+    L.append("> 期间如发现任何异常 / 遗漏，请直接指出，AI 将补充或修正后再请你确认。")
+    L.append("> 禁止「一键脱敏即上云」。")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+    return out
+
+# ---------------------------------------------------------------------------
+# 公开声明豁免（替代“自动识别公开主体白名单”）：默认全脱敏，用户显式声明才豁免
+# ---------------------------------------------------------------------------
+# 显式声明豁免——仅接受“用户明确声明”，不做文件名/目录名隐式推断
+# （避免 sample/demo/pub 等常见命名、或“公开”子串被误判为公开而跳过脱敏）。
+# 声明通道（见 is_public_declared，判定顺序）：
+#   ① --assume-public                 提示词声明：本次输入整体公开
+#   ② --public-paths <路径> [<路径>]  指定文件/文件夹公开；文件夹=其下全部（递归）
+#   ③ 伴随清单 .nodesens / desensitize_manifest.json（重复使用的高级选项）
+# 数据库/知识库等非文件源由 AI Agent 在闸门直接记为“已声明公开”，不经本脚本处理。
+PUBLIC_MANIFEST_NAMES = (".nodesens", "desensitize_manifest.json")  # 伴随清单（高级）
+PUBLIC_DECL_WARNING = ("请确认确为公开信息：被声明豁免的文件不会被脱敏，"
+                       "若声明有误可能导致敏感信息未经脱敏直接外传。")
+
+
+def _read_manifest(fp):
+    """读取伴随清单：每行一个相对路径/通配符（fnmatch），# 开头或空行忽略。"""
+    pats = []
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            for ln in f:
+                s = ln.strip()
+                if s and not s.startswith("#"):
+                    pats.append(s)
+    except Exception:
+        pass
+    return pats
+
+
+def discover_public_manifests(input_path, manifest_override=None):
+    """发现输入目录树内的伴随清单（.nodesens / desensitize_manifest.json），
+    并合并 --public-manifest 自定义清单。
+    返回 [(dir_abs, [patterns...], manifest_file), ...]；patterns 相对 dir 的路径/
+    通配符，亦按 basename 匹配。自定义清单以输入根目录为基准匹配。"""
+    manifests = []
+    src_root = input_path if os.path.isdir(input_path) else os.path.dirname(os.path.abspath(input_path))
+    src_root = os.path.abspath(src_root)
+    if manifest_override and os.path.isfile(manifest_override):
+        manifests.append((src_root, _read_manifest(manifest_override),
+                          os.path.abspath(manifest_override)))
+    if os.path.isfile(input_path):
+        base = os.path.dirname(os.path.abspath(input_path))
+        for name in PUBLIC_MANIFEST_NAMES:
+            fp = os.path.join(base, name)
+            if os.path.isfile(fp):
+                manifests.append((base, _read_manifest(fp), fp))
+        return manifests
+    root = os.path.abspath(input_path)
+    for dirpath, _dirs, filenames in os.walk(root):
+        for name in PUBLIC_MANIFEST_NAMES:
+            if name in filenames:
+                fp = os.path.join(dirpath, name)
+                manifests.append((dirpath, _read_manifest(fp), fp))
+    return manifests
+
+
+def _resolve_public_paths(public_paths):
+    """解析 --public-paths：绝对化并分类为 [(abspath, 'dir'|'file'), ...]。
+    不存在的路径忽略（偏向“有疑即脱敏”，声明错了最多多脱敏、不会漏脱敏）。"""
+    out = []
+    if not public_paths:
+        return out
+    for p in public_paths:
+        ap = os.path.abspath(os.path.expanduser(p))
+        if os.path.isdir(ap):
+            out.append((ap, "dir"))
+        elif os.path.isfile(ap):
+            out.append((ap, "file"))
+    return out
+
+
+def is_public_declared(path, src_root, manifests, assume_public, public_paths=None):
+    """返回声明豁免原因字符串；非公开返回 None。
+    判定顺序：① --assume-public 全局声明；② --public-paths 指定文件/文件夹；
+    ③ 伴随清单(.nodesens)匹配（高级重复使用）。
+    不做任何文件名/目录名隐式推断（sample/demo/pub/“公开”等命名不再触发豁免）。"""
+    if assume_public:
+        return "用户声明公开(--assume-public)"
+    absp = os.path.abspath(path)
+    for pp, kind in _resolve_public_paths(public_paths):
+        if kind == "file" and absp == pp:
+            return "用户声明公开(文件: %s)" % os.path.relpath(pp, src_root)
+        if kind == "dir" and (absp == pp or absp.startswith(pp + os.sep)):
+            return "用户声明公开(文件夹: %s)" % os.path.relpath(pp, src_root)
+    # 伴随清单（高级重复使用）
+    for mdir, pats, mfile in manifests:
+        mrel = os.path.relpath(absp, mdir)
+        base = os.path.basename(absp)
+        for pat in pats:
+            if mrel == pat or fnmatch.fnmatch(mrel, pat) or fnmatch.fnmatch(base, pat):
+                return "伴随清单声明(%s)" % os.path.relpath(mfile, src_root)
+    return None
 
 # 本地 OCR：rapidocr（纯 pip 安装，模型随 wheel 捆绑，完全离线、数据不出本机）。
 # 引擎按需惰性初始化（首次加载模型约数秒，之后常驻复用）。
@@ -278,6 +627,11 @@ def mask_value(kind: str, value: str) -> str:
         return value[:2] + "*" * (len(value) - 4) + value[-2:]
     if kind == "passport" and len(value) >= 8:
         return value[0] + "*" * (len(value) - 3) + value[-2:]
+    if kind == "jwt":
+        # 保留 eyJ 前缀与末 6 位（便于人工辨认与恢复），中间掩码
+        if len(value) > 12:
+            return value[:6] + "***" + value[-6:]
+        return value[:3] + "***"
     if kind in ("cn_name", "name"):
         # 保留姓氏/首字，其余脱敏（原始值仍记录于加密映射表，可逆）
         return value[0] + "*" * (len(value) - 1)
@@ -337,7 +691,7 @@ def desensitize_text(text: str, mode: str, token_map: dict, counts: dict,
             result = re.sub(re.escape(nm), name_cb, result)
 
     # 3.2 顺序应用正则（先处理 ID/手机，避免银行卡重复命中）
-    for kind in ["id_card", "phone", "bank_card", "ip", "email", "plate", "passport"]:
+    for kind in ["id_card", "phone", "bank_card", "ip", "email", "jwt", "plate", "passport"]:
         pat = patterns[kind]
         cb = _repl_closure(kind, mode, token_map, counts, hits)
         result = pat.sub(lambda m, _cb=cb: _cb(m), result)
@@ -388,24 +742,59 @@ def scan_text(text: str, names: set = None, patterns=None):
     return counts
 
 
+def _read_text(path):
+    """读取文本文件并自动探测编码：UTF-8 → GB18030(GBK 超集) → 兜底。
+
+    电商/小微企业导出报表（千川/抖音/拼多多等）常为 GBK/GB2312 编码，此前按
+    UTF-8 强制读取会中文乱码（数字脱敏仍正常但可读性受损）。现自动探测：先试
+    UTF-8，失败则试 GB18030（GBK 的超集，覆盖常见中文编码），再失败才以
+    errors=replace 兜底。"""
+    with open(path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: dict,
                  mapping: dict, names: set, counts_total: dict, do_write: bool,
-                 patterns=None, skipped=None):
-    """处理单个文件。skipped 为可选 list，用于收集“未处理文件”（skip manifest）。"""
+                 patterns=None, skipped=None, public_manifests=None,
+                 assume_public=False, public_paths=None, cleaning=None):
+    """处理单个文件。skipped 为可选 list，用于收集“未处理文件”（skip manifest）。
+    public_manifests/assume_public/public_paths 用于“公开声明豁免”：命中则跳过脱敏
+    （留痕+警示，绝不静默）。声明豁免不做文件名/目录名隐式推断。
+    cleaning 为可选 dict，累计“疑似未清洗数据形态”计数（仅提醒，不脱敏）。"""
     try:
         # 跳过流程自身产出的元数据文件，避免把清单/报告当作业务文本脱敏
         if os.path.basename(path) in META_SKIP:
             return "skip_meta"
+        # 公开声明豁免（默认全脱敏，用户显式声明才跳过）
+        pub_reason = is_public_declared(path, src_root, public_manifests,
+                                        assume_public, public_paths)
+        if pub_reason:
+            if do_write:
+                # run 模式：被声明公开的文件不脱敏、不写入输出目录（仅留痕）
+                _record_public_declared(skipped, path, src_root,
+                                        pub_reason + "，已跳过脱敏")
+                return "skipped"
+            # scan 模式：继续下方读取并检测（fail-safe：仍报命中，不计入脱敏计划）
         ext = os.path.splitext(path)[1].lower()
         # 二进制/库文件：抽取文本后再脱敏（库缺失则跳过并告警）
         if ext in EXTRACT_EXTS:
             return _process_extracted(path, mode, out_root, src_root, token_map,
                                       mapping, names, counts_total, do_write,
-                                      patterns, skipped)
+                                      patterns, skipped, pub_reason)
         # 既非文本/代码也非可抽取类型：登记为未处理（不静默忽略）
         if ext not in (TEXT_EXTS | CODE_EXTS):
             if skipped is not None:
-                if ext in IMAGE_EXTS:
+                if pub_reason:
+                    # 声明公开但非文本类：登记为公开声明（覆盖默认分类）
+                    _record_public_declared(skipped, path, src_root,
+                                            pub_reason + "，已跳过脱敏（非文本类，未检测）")
+                elif ext in IMAGE_EXTS:
                     _skip(skipped, path, src_root, "image",
                           "影像/图片文件（%s）：scan/run 不直接做 OCR，请先运行 preprocess"
                           "（内置 rapidocr 本地 OCR，完全离线）识别为文本后再纳入脱敏；"
@@ -415,16 +804,22 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
                           "未支持的信息源类型（%s）：二进制/未知格式，若含敏感文本请先转为"
                           "文本文件（或 OCR/解密）后再纳入脱敏" % ext)
             return "skipped"
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        text = _read_text(path)
     except Exception as e:
         print("  [跳过] 无法读取 %s: %s" % (path, e), file=sys.stderr)
         _skip(skipped, path, src_root, "error", "读取失败: %s" % e)
         return "error"
 
     ext = os.path.splitext(path)[1].lower()
-    is_code = ext in CODE_EXTS
+    # 密钥检测扩展：html/htm 一并启用（内嵌 <script> 的 adminToken/secret 赋值是真实泄漏点）
+    is_code = ext in SECRET_EXTS
     rel_path = os.path.relpath(path, src_root)
+
+    # 清洗建议：检测疑似「未清洗/不规范」数据形态（仅提醒、不脱敏，见 CLEANING_ADVICE_TEXT）
+    adv = _find_cleaning_advice(text)
+    if adv and cleaning is not None:
+        for k, v in adv.items():
+            cleaning[k] = cleaning.get(k, 0) + v
 
     if not do_write:
         c = scan_text(text, names, patterns)
@@ -432,13 +827,28 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
             sec = len(SECRET_PATTERN.findall(text))
             if sec:
                 c["secret"] = c.get("secret", 0) + sec
+            # SQL INSERT 位置参数口令（与 run 分支保持一致计数）
+            if ext == ".sql":
+                sec2 = len(_sql_insert_secret_values(text))
+                if sec2:
+                    c["secret"] = c.get("secret", 0) + sec2
+        if pub_reason:
+            # scan 仍检测：若检出疑似敏感，追加警示；声明文件不计入脱敏计划
+            reason = pub_reason + "，已跳过脱敏"
+            if c:
+                reason += "（scan 仍检出 %d 处疑似敏感，请复核）" % sum(c.values())
+                print("  %-40s %s  ⚠ 声明公开但检出疑似敏感" % (rel_path, c))
+            _record_public_declared(skipped, path, src_root, reason)
+            return "skipped"
         if c:
             print("  %-40s %s" % (rel_path, c))
             for k, v in c.items():
                 counts_total[k] = counts_total.get(k, 0) + v
+        if adv:
+            print("  %-40s ⚠清洗建议 %s（先清洗再脱敏）" % (rel_path, adv))
         return "processed"
 
-    # 代码文件额外处理密钥
+    # 代码/类代码文件额外处理密钥
     if is_code:
         def _sec_repl(m):
             val = m.group("val")
@@ -457,6 +867,19 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
                 {"type": "secret", "original": inner, "replacement": repl})
             return m.group(0).replace(val, repl)
         text = SECRET_PATTERN.sub(_sec_repl, text)
+        # SQL INSERT 位置参数口令：VALUES(..., 'p@ssw0rd', ...) 前无 password= 前缀，
+        # SECRET_PATTERN 捕获不到，按"列名含口令关键词 → 对应位置值"定位脱敏。
+        if ext == ".sql":
+            for quoted, inner in _sql_insert_secret_values(text):
+                counts_total["secret"] = counts_total.get("secret", 0) + 1
+                if mode == "hybrid":
+                    repl = "***%s%s%s" % (HYBRID_SEP_L, token_value(token_map, inner),
+                                          HYBRID_SEP_R)
+                else:
+                    repl = "***"
+                mapping.setdefault(rel_path, []).append(
+                    {"type": "secret", "original": inner, "replacement": repl})
+                text = text.replace(quoted, repl, 1)
 
     new_text, hits = desensitize_text(text, mode, token_map, counts_total, names, patterns)
     for h in hits:
@@ -500,6 +923,11 @@ def _extract_sqlite(path):
         con.close()
 
 
+# xlsx 批注二次打开的体积阈值：超过则跳过批注扫描（read_only 正文不受影响），
+# 避免超大表非只读整表载入的内存开销；批注内敏感信息改由人工检查提示兜底。
+_XLSX_COMMENT_LIMIT = 15 * 1024 * 1024  # 15MB
+
+
 def _extract_text(ext, path):
     """返回 (文本, 缺失库名或None, 原因或None)。
 
@@ -515,9 +943,18 @@ def _extract_text(ext, path):
         if ext == ".docx":
             from docx import Document
             doc = Document(path)
-            text = "\n".join(p.text for p in doc.paragraphs if p.text)
+            # 段落 + 表格都要抽：小微常用 Word 表格做登记表（发票/花名册/台账），
+            # 此前只抽段落导致表格内身份证/税号/金额漏检。
+            parts = [p.text for p in doc.paragraphs if p.text]
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [c.text for c in row.cells if c.text]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            text = "\n".join(parts)
         elif ext == ".xlsx":
             from openpyxl import load_workbook
+            # 正文：read_only 快速路径（超大表内存友好、不整表载入）。
             wb = load_workbook(path, read_only=True, data_only=True)
             lines = []
             for ws in wb.worksheets:
@@ -525,6 +962,31 @@ def _extract_text(ext, path):
                     cells = [str(c) for c in row if c is not None]
                     if cells:
                         lines.append(" ".join(cells))
+            try:
+                wb.close()
+            except Exception:
+                pass
+            # 批注：非只读**二次打开**单独扫描（read_only 模式读不到批注）。
+            # 大文件非只读加载内存开销高：超过阈值则跳过批注扫描并明确提示
+            # （批注多为少量补充信息，如"客户手机 … 记得回访"，提示后由用户人工检查）。
+            if os.path.getsize(path) <= _XLSX_COMMENT_LIMIT:
+                wb2 = load_workbook(path, read_only=False, data_only=True)
+                try:
+                    for ws in wb2.worksheets:
+                        for row in ws.iter_rows():
+                            for cell in row:
+                                if cell.comment and cell.comment.text:
+                                    lines.append("[批注] %s" % cell.comment.text)
+                finally:
+                    try:
+                        wb2.close()
+                    except Exception:
+                        pass
+            else:
+                print("  [提示] %s 体积 >%dMB，跳过批注扫描：批注内如有敏感信息（手机/证件等）"
+                      "请人工检查后再上云。" % (os.path.basename(path),
+                                                _XLSX_COMMENT_LIMIT // (1024 * 1024)),
+                      file=sys.stderr)
             text = "\n".join(lines)
         elif ext == ".pptx":
             from pptx import Presentation
@@ -595,7 +1057,8 @@ def _pdf_has_encrypt(path):
 
 
 def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
-                       names, counts_total, do_write, patterns, skipped):
+                       names, counts_total, do_write, patterns, skipped,
+                       pub_reason=None, cleaning=None):
     ext = os.path.splitext(path)[1].lower()
     rel_path = os.path.relpath(path, src_root)
     text, missing, reason = _extract_text(ext, path)
@@ -608,16 +1071,39 @@ def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
             cat = {"encrypted": "encrypted", "image_only": "image_pdf",
                    "empty": "empty", "error": "error"}.get(reason, "error")
             reason = REMIND.get(reason, "文本抽取失败（请确认文件未加密且未损坏）")
-        _skip(skipped, path, src_root, cat, reason)
-        print("  [跳过] %s：%s" % (rel_path, reason), file=sys.stderr)
+        if pub_reason:
+            # 声明公开但无法抽取文本（加密/图片型等）：登记为公开声明，不按异常报
+            _record_public_declared(skipped, path, src_root,
+                                    pub_reason + "，已跳过脱敏（无法抽取文本，未检测）")
+        else:
+            _skip(skipped, path, src_root, cat, reason)
+            print("  [跳过] %s：%s" % (rel_path, reason), file=sys.stderr)
         return "skipped"
+    # 清洗建议：二进制文档（表格/批注）同样检测疑似未清洗形态（仅提醒、不脱敏）
+    adv = _find_cleaning_advice(text)
+    if adv and cleaning is not None:
+        for k, v in adv.items():
+            cleaning[k] = cleaning.get(k, 0) + v
     if not do_write:
         c = scan_text(text, names, patterns)
+        if pub_reason:
+            # scan 仍检测：若检出疑似敏感，追加警示；不计入脱敏计划
+            reason = pub_reason + "，已跳过脱敏"
+            if c:
+                reason += "（scan 仍检出 %d 处疑似敏感，请复核）" % sum(c.values())
+                print("  %-40s %s  ⚠ 声明公开但检出疑似敏感" % (rel_path, c))
+            _record_public_declared(skipped, path, src_root, reason)
+            return "skipped"
         if c:
             print("  %-40s %s" % (rel_path, c))
             for k, v in c.items():
                 counts_total[k] = counts_total.get(k, 0) + v
+        if adv:
+            print("  %-40s ⚠清洗建议 %s（先清洗再脱敏）" % (rel_path, adv))
         return "processed"
+    if pub_reason:
+        _record_public_declared(skipped, path, src_root, pub_reason + "，已跳过脱敏")
+        return "skipped"
     new_text, hits = desensitize_text(text, mode, token_map, counts_total, names, patterns)
     for h in hits:
         h["file"] = rel_path
@@ -695,24 +1181,50 @@ def find_collisions(mapping: dict):
 
 def _report_skipped(skipped, src_root):
     """打印“未处理文件清单”（skip manifest），杜绝目录扫描的静默漏扫。
+    区分两类：public_declared（用户显式声明公开，已跳过脱敏）与其他（可能含敏感，须处理）。
     兼容旧式 (path, reason) 元组与新式 dict 两种结构。"""
     if not skipped:
         return
-    print("\n[警告] 以下 %d 个文件未被处理（可能含敏感信息，上云前须先转文本/OCR/"
-          "安装抽取库，或人工复核）：" % len(skipped), file=sys.stderr)
+    pub = []
+    others = []
     for it in skipped:
-        if isinstance(it, dict):
+        cat = it.get("category") if isinstance(it, dict) else None
+        (pub if cat == "public_declared" else others).append(it)
+
+    if pub:
+        print("\n[公开声明豁免] 以下 %d 个文件经用户显式声明为公开（--assume-public / "
+              "--public-paths / 伴随清单），已跳过脱敏（不脱敏、不计数、不报告命中）："
+              % len(pub), file=sys.stderr)
+        for it in pub:
             rel = it.get("rel") or os.path.relpath(it.get("path", ""), src_root)
             reason = it.get("reason", "")
-            warn = it.get("warning")
-            line = "    - %s  （%s）" % (rel, reason)
-            print(line, file=sys.stderr)
-            if warn:
-                print("        %s" % warn, file=sys.stderr)
-        else:
-            p, reason = it
-            print("    - %s  （%s）" % (os.path.relpath(p, src_root), reason),
-                  file=sys.stderr)
+            print("    - %s  （%s）" % (rel, reason), file=sys.stderr)
+            sz = it.get("size")
+            sh = it.get("sha256")
+            if sz is not None:
+                print("        🔒 %d bytes  sha256:%s" % (sz, sh), file=sys.stderr)
+            w = it.get("warning")
+            if w:
+                print("        ⚠ %s" % w, file=sys.stderr)
+        print("  → 请确认这些文件确为公开信息；误声明会导致敏感信息未经脱敏直接外传。",
+              file=sys.stderr)
+
+    if others:
+        print("\n[警告] 以下 %d 个文件未被处理（可能含敏感信息，上云前须先转文本/OCR/"
+              "安装抽取库，或人工复核）：" % len(others), file=sys.stderr)
+        for it in others:
+            if isinstance(it, dict):
+                rel = it.get("rel") or os.path.relpath(it.get("path", ""), src_root)
+                reason = it.get("reason", "")
+                warn = it.get("warning")
+                line = "    - %s  （%s）" % (rel, reason)
+                print(line, file=sys.stderr)
+                if warn:
+                    print("        %s" % warn, file=sys.stderr)
+            else:
+                p, reason = it
+                print("    - %s  （%s）" % (os.path.relpath(p, src_root), reason),
+                      file=sys.stderr)
 
 
 def report_collisions(collisions: dict, mode: str):
@@ -763,9 +1275,10 @@ def load_names(path: str):
         return set()
 
 
-def _skip(skipped, path, src_root, category, reason, action=None, warning=None):
+def _skip(skipped, path, src_root, category, reason, action=None, warning=None, extra=None):
     """向 skipped 列表追加结构化未处理项（dict）。skipped 为 None 时跳过。
-    分类与动作/警告来自 PREPROCESS_ACTIONS，允许调用处显式覆盖。"""
+    分类与动作/警告来自 PREPROCESS_ACTIONS，允许调用处显式覆盖。
+    extra 为可选 dict，合并进该项（如公开声明的 size/sha256）。"""
     if skipped is None:
         return
     act, warn = PREPROCESS_ACTIONS.get(category, (action, warning))
@@ -773,14 +1286,33 @@ def _skip(skipped, path, src_root, category, reason, action=None, warning=None):
         act = action
     if warning is not None:
         warn = warning
-    skipped.append({
+    item = {
         "path": path,
         "rel": os.path.relpath(path, src_root),
         "category": category,
         "reason": reason,
         "action": act,
         "warning": warn,
-    })
+    }
+    if extra:
+        item.update(extra)
+    skipped.append(item)
+
+
+def _record_public_declared(skipped, path, src_root, reason):
+    """记录“公开声明豁免”项，附带 size/sha256 便于外发前核对（绝不静默）。"""
+    meta = {}
+    try:
+        meta["size"] = os.path.getsize(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        meta["sha256"] = h.hexdigest()
+    except Exception:
+        pass
+    _skip(skipped, path, src_root, "public_declared", reason,
+          warning=PUBLIC_DECL_WARNING, extra=meta)
 
 
 def _mk_skip(path, src_root, category, reason):
@@ -1136,11 +1668,24 @@ def cmd_preprocess(args):
     并在确认单中设置“经用户确认与校对无异常后再 run”的闸门。"""
     input_path = os.path.abspath(args.input)
     src_root = input_path if os.path.isdir(input_path) else os.path.dirname(input_path)
-    out_dir = os.path.abspath(args.out_dir)
-    if not args.manifest:
-        args.manifest = os.path.join(out_dir, "desensitize_preprocess.json")
-    ready_dir = os.path.join(out_dir, "ready")
-    ocr_dir = os.path.join(out_dir, "ocr")
+    ws = _ws_root(args)
+    if ws:
+        _ensure_workspace(ws)
+        if args.out_dir == "./preprocessed":
+            args.out_dir = os.path.join(ws, WS_UNDESEN)
+        out_dir = os.path.abspath(args.out_dir)
+        if not args.manifest:
+            args.manifest = os.path.join(ws, "desensitize_preprocess.json")
+        ready_dir = os.path.join(ws, WS_READY)
+        ocr_dir = os.path.join(ws, WS_OCR)
+        summary_path = os.path.join(ws, WS_PREPROC_SUMMARY)
+    else:
+        out_dir = os.path.abspath(args.out_dir)
+        if not args.manifest:
+            args.manifest = os.path.join(out_dir, "desensitize_preprocess.json")
+        ready_dir = os.path.join(out_dir, "ready")
+        ocr_dir = os.path.join(out_dir, "ocr")
+        summary_path = os.path.join(out_dir, "desensitize_preprocess_summary.md")
     os.makedirs(ready_dir, exist_ok=True)
     os.makedirs(ocr_dir, exist_ok=True)
 
@@ -1258,7 +1803,6 @@ def cmd_preprocess(args):
     }
     with open(args.manifest, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
-    summary_path = os.path.join(out_dir, "desensitize_preprocess_summary.md")
     ready_list = [(os.path.abspath(p),
                    os.path.abspath(os.path.join(
                        ready_dir, os.path.relpath(p, src_root))))
@@ -1292,6 +1836,11 @@ def cmd_preprocess(args):
     n_proof = sum(1 for it in items if it.get("needs_proofread"))
     if n_proof:
         print("  📝 有 %d 个 OCR 文件需逐项校对。" % n_proof, file=sys.stderr)
+    if ws:
+        _refresh_index(ws)
+        print("  成果索引（一站式查阅全部产物）：%s" % os.path.join(ws, WS_INDEX_MD),
+              file=sys.stderr)
+        print("  下一步：校对 OCR 后执行 run（带 --workspace %s）" % ws, file=sys.stderr)
 
 
 def cmd_scan(args):
@@ -1299,16 +1848,25 @@ def cmd_scan(args):
     patterns = build_patterns(args.cn_enhance)
     input_path = os.path.abspath(args.input)
     src_root = input_path if os.path.isdir(input_path) else os.path.dirname(input_path)
+    public_manifests = discover_public_manifests(input_path, getattr(args, "public_manifest", None))
     total = {}
+    cleaning = {}
     skipped = []
-    print("扫描命中（不生成文件）%s：" % ("[中文增强开启]" if args.cn_enhance else ""))
+    print("扫描命中（不生成文件）%s%s：" % (
+        "[中文增强开启]" if args.cn_enhance else "",
+        " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else ""))
     for p in iter_targets(input_path, args.recursive):
         process_file(p, "mask", "", src_root, {}, {}, names, total, do_write=False,
-                     patterns=patterns, skipped=skipped)
+                     patterns=patterns, skipped=skipped,
+                     public_manifests=public_manifests, assume_public=args.assume_public,
+                     public_paths=args.public_paths, cleaning=cleaning)
     if total:
         print("\n汇总：", json.dumps(total, ensure_ascii=False))
     else:
         print("未发现已知敏感标识符。")
+    if cleaning:
+        print("\n⚠ 清洗建议（疑似未清洗数据形态，未自动脱敏）：%s" % json.dumps(cleaning, ensure_ascii=False))
+        print(CLEANING_ADVICE_TEXT)
     _report_skipped(skipped, src_root)
 
 
@@ -1317,6 +1875,13 @@ def cmd_run(args):
     patterns = build_patterns(args.cn_enhance)
     input_path = os.path.abspath(args.input)
     src_root = input_path if os.path.isdir(input_path) else os.path.dirname(input_path)
+    ws = _ws_root(args)
+    if ws:
+        _ensure_workspace(ws)
+        if args.out == "./desensitized":
+            args.out = os.path.join(ws, WS_DESEN)
+        if args.keys == "./.desensitize_keys":
+            args.keys = os.path.join(ws, WS_KEYS)
     out_root = args.out
     keys_dir = args.keys
     os.makedirs(out_root, exist_ok=True)
@@ -1346,11 +1911,21 @@ def cmd_run(args):
     mapping = {}
     token_map = {}
     total = {}
+    cleaning = {}
     skipped = []
-    print("开始脱敏（模式=%s）%s..." % (args.mode, "[中文增强开启]" if args.cn_enhance else ""))
+    public_manifests = discover_public_manifests(input_path, getattr(args, "public_manifest", None))
+    print("开始脱敏（模式=%s）%s%s..." % (
+        args.mode,
+        "[中文增强开启]" if args.cn_enhance else "",
+        " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else ""))
     for p in iter_targets(input_path, args.recursive):
         process_file(p, args.mode, out_root, src_root, token_map, mapping, names, total,
-                     do_write=True, patterns=patterns, skipped=skipped)
+                     do_write=True, patterns=patterns, skipped=skipped,
+                     public_manifests=public_manifests, assume_public=args.assume_public,
+                     public_paths=args.public_paths, cleaning=cleaning)
+    if cleaning:
+        print("")
+        print("  ⚠ 清洗建议（未清洗数据形态，未自动脱敏，请先清洗再脱敏）：%s" % cleaning)
 
     enc_info = encrypt_mapping(mapping, keys_dir, args.passphrase)
     # 唯一性检测：仅 mask 模式可能因“同型不同值”产生多对一歧义（影响恢复）。
@@ -1388,6 +1963,8 @@ def cmd_run(args):
                 "reason": it.get("reason") if isinstance(it, dict) else it[1],
                 "action": it.get("action") if isinstance(it, dict) else None,
                 "warning": it.get("warning") if isinstance(it, dict) else None,
+                "size": it.get("size") if isinstance(it, dict) else None,
+                "sha256": it.get("sha256") if isinstance(it, dict) else None,
             }
             for it in skipped
         ],
@@ -1396,8 +1973,17 @@ def cmd_run(args):
                 "=ambiguous 仅可能出现在 mask 模式（同型不同值碰撞），恢复可能混淆，"
                 "建议改用 --mode hybrid（语义掩码+唯一令牌，兼顾字段语义与无歧义）或 --mode token；"
                 "=irreversible 表示 redact 模式（不可逆，不可还原）。",
+        # 清洗建议：疑似「未清洗/不规范」数据形态（带分隔符/短位手机、15 位旧身份证、
+        # 订单号与银行卡区间重叠等）。这些形态未自动脱敏或可能误判，须先清洗再脱敏。
+        "cleaning_advice": cleaning,
+        "cleaning_advice_text": (CLEANING_ADVICE_TEXT if cleaning else ""),
     }
-    report_path = os.path.join(out_root, "..", "desensitize_report.json")
+    # 报告位置：工作区模式下置于工作区根（位于脱敏副本目录之外，避免被一并上传）；
+    # 非工作区模式保持原行为（取 out 的父目录）。
+    if ws:
+        report_path = os.path.join(ws, "desensitize_report.json")
+    else:
+        report_path = os.path.join(out_root, "..", "desensitize_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
@@ -1414,6 +2000,17 @@ def cmd_run(args):
            if safety == "ambiguous" else ""))
     print("  报告         : %s" % os.path.abspath(report_path))
     _report_skipped(skipped, src_root)
+
+    # 工作区模式：生成上云前自检报告 + 刷新成果索引
+    if ws:
+        ocr_dir = os.path.join(ws, WS_OCR)
+        sc = _write_selfcheck_report(ws, report, ocr_dir)
+        _refresh_index(ws)
+        print("")
+        print("  📋 工作区成果索引 : %s" % os.path.join(ws, WS_INDEX_MD), file=sys.stderr)
+        print("  🔒 上云前自检报告 : %s" % sc, file=sys.stderr)
+        print("  → 上云前请逐项校对 OCR 副本 / 脱敏副本 / 本报告，确认后回复「确认上云」。",
+              file=sys.stderr)
 
 
 def _load_mapping(keys_dir, file=None, key=None, passphrase=None):
@@ -1444,6 +2041,9 @@ def _load_mapping(keys_dir, file=None, key=None, passphrase=None):
 
 def cmd_decrypt(args):
     """解密映射表，供本地复核可逆性（无需上云）。"""
+    ws = _ws_root(args)
+    if ws and not args.out:
+        args.out = os.path.join(ws, "映射表明细.json")
     try:
         data, enc_path = _load_mapping(args.keys, args.file, args.key, args.passphrase)
     except (FileNotFoundError, ValueError) as e:
@@ -1457,6 +2057,8 @@ def cmd_decrypt(args):
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print("已解密映射表写入：%s" % os.path.abspath(args.out))
+        if ws:
+            _refresh_index(ws)
         return
 
     total = sum(len(v) for v in data.values())
@@ -1479,10 +2081,19 @@ def cmd_decrypt(args):
         print("\n[OK] 未检测到多对一歧义，原始值可唯一还原"
               "（hybrid / token 模式，或碰撞为空的 mask 模式）。")
     print("\n（加 --out <文件.json> 可导出完整 original↔replacement 明细，用于本地复核）")
+    if ws:
+        _refresh_index(ws)
 
 
 def cmd_restore(args):
     """用加密映射表把脱敏副本回填为含原值的内部文档（映射表不离本地）。"""
+    ws = _ws_root(args)
+    if ws:
+        _ensure_workspace(ws)
+        if args.input == "./desensitized":
+            args.input = os.path.join(ws, WS_DESEN)
+        if args.out == "./restored":
+            args.out = os.path.join(ws, WS_RESTORE)
     try:
         data, enc_path = _load_mapping(args.keys, args.file, args.key, args.passphrase)
     except (FileNotFoundError, ValueError) as e:
@@ -1556,11 +2167,20 @@ def cmd_restore(args):
         total_restored, total_collision, total_skipped))
     print("  （映射表 %s 已用于回填；回填产物恢复为含原值的本地内部文档，请按需谨慎保管，"
           "勿随脱敏副本一同外传）" % enc_path)
+    if ws:
+        _refresh_index(ws)
 
 
 def cmd_audit(args):
     """基于 run 生成的 desensitize_report.json 自动产出审计文档（九节，
     对齐 SKILL.md 的 11 项上云前自查清单）。"""
+    ws = _ws_root(args)
+    if ws:
+        _ensure_workspace(ws)
+        if args.report == "./desensitize_report.json":
+            args.report = os.path.join(ws, "desensitize_report.json")
+        if args.out == "./desensitize_audit.md":
+            args.out = os.path.join(ws, WS_AUDIT)
     report_path = args.report
     if not os.path.isfile(report_path):
         print("未找到报告文件：%s" % report_path, file=sys.stderr)
@@ -1670,9 +2290,32 @@ def cmd_audit(args):
              "清单与人工复核仍须由操作人逐项确认，禁止“一键脱敏即上云”。")
 
     out_md = args.out
+    os.makedirs(os.path.dirname(out_md) or ".", exist_ok=True)
     with open(out_md, "w", encoding="utf-8") as f:
         f.write("\n".join(L) + "\n")
     print("已生成审计文档：%s" % os.path.abspath(out_md))
+    if ws:
+        _refresh_index(ws)
+
+
+def cmd_status(args):
+    """回显工作区成果索引：一站式查看全部产物位置与“可上云/保密”状态。"""
+    ws = _ws_root(args)
+    if not ws or not os.path.isdir(ws):
+        print("未找到有效工作区：%s" % ws, file=sys.stderr)
+        print("用法：desensitize.py status --workspace <工作区目录>", file=sys.stderr)
+        return
+    md = os.path.join(ws, WS_INDEX_MD)
+    if not os.path.isfile(md):
+        _refresh_index(ws)
+    print("=" * 60)
+    print("脱敏工作区成果索引：%s" % os.path.abspath(ws))
+    print("=" * 60)
+    for e in json.load(open(os.path.join(ws, WS_INDEX_JSON), encoding="utf-8"))["entries"]:
+        print("  [%-4s] %-22s %s" % (e["tag"], e["name"], e["path"]))
+    print("-" * 60)
+    print("仅 `03_脱敏副本/` 可上云；上云前请阅读 `05_上云前自检报告.md` 并完成三处校对。")
+    print("详情见：%s" % os.path.abspath(md))
 
 
 def build_parser():
@@ -1685,6 +2328,16 @@ def build_parser():
     sp.add_argument("--names", help="已知姓名清单文件（每行一个）")
     sp.add_argument("--cn-enhance", action="store_true",
                     help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
+    sp.add_argument("--assume-public", action="store_true",
+                    help="提示词声明：用户已声明本次输入整体为公开/样例/已脱敏，全部跳过脱敏"
+                         "（仅留痕+警示，不脱敏不计数）")
+    sp.add_argument("--public-paths", nargs="+", default=None,
+                    help="显式声明公开的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
+                         "无需脱敏；文件=该文件无需脱敏。替代隐蔽的文件名哨兵/隐藏标记，"
+                         "仅对本次任务生效（不落盘为永久设置）")
+    sp.add_argument("--public-manifest", default=None,
+                    help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
+                         "默认自动发现输入目录树内的清单（重复使用的高级选项）")
     sp.set_defaults(func=cmd_scan)
 
     rp = sub.add_parser("run", help="脱敏并生成加密映射表")
@@ -1701,6 +2354,19 @@ def build_parser():
                     help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
     rp.add_argument("--preprocess-manifest", default=None,
                     help="预处理清单 JSON；若仍含异常则拒绝执行 run（异常清完再继续）")
+    rp.add_argument("--assume-public", action="store_true",
+                    help="提示词声明：用户已声明本次输入整体为公开/样例/已脱敏，全部跳过脱敏"
+                         "（仅留痕+警示，不脱敏不计数）")
+    rp.add_argument("--public-paths", nargs="+", default=None,
+                    help="显式声明公开的文件/文件夹路径（可多个）：文件夹=其下全部（递归）"
+                         "无需脱敏；文件=该文件无需脱敏。替代隐蔽的文件名哨兵/隐藏标记，"
+                         "仅对本次任务生效（不落盘为永久设置）")
+    rp.add_argument("--public-manifest", default=None,
+                    help="自定义公开声明伴随清单路径（.nodesens / desensitize_manifest.json）；"
+                         "默认自动发现输入目录树内的清单（重复使用的高级选项）")
+    rp.add_argument("--workspace", default=None,
+                    help="统一成果中心（工作区）目录：启用后脱敏副本/映射表/报告等归入一处，"
+                         "并自动生成 成果索引 与 上云前自检报告（opt-in，不带则保持原默认行为）")
     rp.set_defaults(func=cmd_run)
 
     dp = sub.add_parser("decrypt", help="解密映射表，供本地复核可逆性（不依赖上云）")
@@ -1709,6 +2375,8 @@ def build_parser():
     dp.add_argument("--key", default=None, help="指定密钥文件（默认取目录中最新 .key）")
     dp.add_argument("--passphrase", default=None, help="若用口令派生密钥，提供同一口令")
     dp.add_argument("--out", default=None, help="导出解密后的映射表 JSON 到该路径")
+    dp.add_argument("--workspace", default=None,
+                    help="统一成果中心（工作区）目录：未指定 --out 时，解密明细写入工作区并刷新成果索引")
     dp.set_defaults(func=cmd_decrypt)
 
     rp2 = sub.add_parser("restore", help="用映射表把脱敏副本回填为含原值的内部文档")
@@ -1722,6 +2390,8 @@ def build_parser():
     rp2.add_argument("--passphrase", default=None, help="若用口令派生密钥，提供同一口令")
     rp2.add_argument("--types", default=None,
                      help="仅回填指定类型，逗号分隔（如 name,id_card）；默认全部回填")
+    rp2.add_argument("--workspace", default=None,
+                    help="统一成果中心（工作区）目录：回填产物归入工作区并刷新成果索引")
     rp2.set_defaults(func=cmd_restore)
 
     ap = sub.add_parser("audit", help="基于 run 报告自动生成审计文档（九节，对齐 11 项自查清单）")
@@ -1729,6 +2399,8 @@ def build_parser():
                     help="run 生成的报告（默认 ./desensitize_report.json）")
     ap.add_argument("--out", default="./desensitize_audit.md",
                     help="审计文档输出路径（默认 ./desensitize_audit.md）")
+    ap.add_argument("--workspace", default=None,
+                    help="统一成果中心（工作区）目录：审计文档写入工作区并刷新成果索引")
     ap.set_defaults(func=cmd_audit)
 
     pp = sub.add_parser("preprocess",
@@ -1744,7 +2416,14 @@ def build_parser():
                          "该文件含敏感信息，严禁外传")
     pp.add_argument("--no-auto", action="store_true",
                     help="仅分类与提醒（旧行为），不实际解密/OCR")
+    pp.add_argument("--workspace", default=None,
+                    help="统一成果中心（工作区）目录：启用后未脱敏副本/OCR文本/确认单归入一处"
+                         "并生成成果索引（opt-in，不带则保持原默认行为）")
     pp.set_defaults(func=cmd_preprocess)
+
+    st = sub.add_parser("status", help="回显工作区成果索引（一站式查看全部产物位置与可上云状态）")
+    st.add_argument("--workspace", required=True, help="工作区目录（由 preprocess/run 的 --workspace 指定）")
+    st.set_defaults(func=cmd_status)
     return p
 
 
