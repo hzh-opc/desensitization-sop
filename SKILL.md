@@ -7,13 +7,13 @@ description: >-
   此外，当任务涉及将本地内容送至云端大模型（WorkBuddy 云端模型、OpenClaw、Claude、Codex、GPT 等）处理时，
   须在「上云前」自动执行脱敏自查，在「任务结束后」自动生成审计汇总。
   本文件仅含执行所必需的最小规则；判定依据、分级对照表、精度影响、工具部署等详述见同目录 references/reference.md（按需读取，不自动加载；GitHub 项目说明见 README.md）。
-version: "2.7.0"
+version: "2.10.0"
 agent_created: true
 ---
 
 # 信息脱敏上云 SOP（AI Agent 上云前 / 上云后闭环）
 
-> **版本** v2.7.0（2026-08-18） · **署名** hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） · **版权** Copyright 2026 hzh.opc，基于 [Apache License 2.0](LICENSE) 发布（保留声明、标注修改、附 NOTICE）。
+> **版本** v2.10.0（2026-08-19） · **署名** hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） · **版权** Copyright 2026 hzh.opc，基于 [Apache License 2.0](LICENSE) 发布（保留声明、标注修改、附 NOTICE）。
 
 核心方针（不可违背）：本地存储优先 · 最小必要 · 分类分级 · 脱敏后上云 · 可溯源 · 留审计 · 云端记忆禁存敏感信息。
 **原始敏感文件永远留本地，绝不整份上传。**
@@ -154,7 +154,9 @@ v2.5.0 起**不再自动识别"公开主体"并豁免**（上市公司也有未�
 - `run` 默认 `--mode hybrid`（语义掩码+唯一令牌，可逆、无歧义、保留字段语义）；另有 `mask`/`token`/`redact`。
 - 脱敏副本在 `--out`（默认 `./desensitized`，可上云）；映射表在 `--keys`（默认 `./.desensitize_keys`，密钥 600，绝不外发）。
 - **豁免**：`--assume-public`/`--public-paths`/`--local-only`/`--local-paths`（见「豁免与边界」）。
-- **识别增强**：`--names` 姓名清单、`--cn-enhance` 中文姓名/地址/机构名；**生僻字/特殊字符优先 mask**；**`--mapping` 用户自定义映射**（原始值→替换值，命中主动精确替换，加密入库不外发）。
+- **识别增强**：`--names` 姓名清单、`--cn-enhance` 中文姓名/地址/机构名、`--tabular-names` 表格列头英文姓名（CSV/TSV/xlsx）；**生僻字/特殊字符优先 mask**；**`--mapping` 用户自定义映射**（原始值→替换值，命中主动精确替换，加密入库不外发）。
+- **跨境识别（v2.8+ 内置）**：IBAN / SWIFT / VAT / 国际电话自动识别脱敏；多编码自动探测（GBK / Shift-JIS / BIG5 / cp1252）；全角数字归一；csv/json 内嵌密钥检测。
+- **能力边界（英文/多语言姓名）**：表格 CSV/TSV/xlsx 的英文姓名用 `--tabular-names`（列头解析，John Smith → J*** S****）；自由文本（docx 段落/邮件）与泰文/越南文等多语言姓名，**NER 模型暂不引入**（需联网下载模型、违背「离线·最小依赖」原则），用 `--names` 名单召回。详见 references/reference.md。
 - **清洗建议**：检测疑似未清洗形态（分隔/短位手机、15 位旧证、订单号与银行卡区间重叠），只提醒不自动改。
 
 ## 手动升级（安全零停机 · 仅手动触发）

@@ -2,6 +2,39 @@
 
 本文件按时间倒序记录重大变更。日常细节以 Git 提交为准。
 
+## v2.10.0 · 2026-08-19（网络兜底下载 + xlsx 结构化列解析——落地 2 个 LOW 待办）
+
+- **upgrade.py 网络兜底下载（第三级降级）**：`download_to_staging` 在 git clone / zip 之外新增 **GitHub API tree + raw.githubusercontent.com 逐文件**兜底（`_download_via_api`/`_download_via_api_robust`，含代理绕过重试）。覆盖「github.com:443 被拦截 / codeload 404，但 api.github.com 与 raw.githubusercontent.com 可达」的受限网络；逐文件下载并跳过 `COPY_IGNORE` 应忽略项。
+- **--tabular-names 扩展覆盖 xlsx**：新增 `_collect_tabular_names_xlsx`（openpyxl 读各 sheet 首行列头），补齐结构化列解析对 xlsx 的覆盖——规避 xlsx 抽取为空格分隔文本、列对齐不可靠的问题，直接读单元格结构做列头解析。跨境电商测试套件新增 CB25（PASS 22 / KNOWN_LIMIT 3）。
+- **文档**：SKILL.md / references/reference.md / README.md / CHANGELOG.md 同步；版本 v2.9.1 → v2.10.0。
+
+## v2.9.1 · 2026-08-19（修复 Windows 还原双倍换行 bug——反馈处理）
+
+- **修复 Windows CRLF 双倍换行（高严重度，`feedback/desen_issue_double_crlf.md`）**：`_read_text` 二进制读保留 `\r\n`，但写出走默认文本模式，Windows 上把 `\n` 二次翻译成 `\r\n`，导致 `scan→run→decrypt→restore` 全环后还原产物每个换行翻倍（`\r\n`→`\r\n\r\n`），破坏「还原=原文」核心保证，并使 `upgrade.py` 全环校验失败。修复：新增 `_write_text_raw`/`_read_text_plain`（`newline=""`），统一替换 6 处业务数据读写（run 写脱敏副本、提取库写 .txt、OCR 文本写 ×2、restore 读 + 写），根因级消除「读保留、写翻译」的不对称。CRLF/LF 均逐字节一致（实测 CRLF 98→98 字节）。
+- **校验门加固（`install.py`/`upgrade.py` 的 verify）**：样本写入改用 `newline=""`（避免 Windows 预先翻译样本而掩盖 bug），并新增 **CRLF 样本的全环逐字节比对**，使换行类 bug 在任意平台都能被校验门捕获。
+- **文档**：AGENT_INSTALL.md 补充 Windows 换行对照与受限网络离线升级指引；CHANGELOG 同步；版本 v2.9.0 → v2.9.1。
+- **暂缓（LOW，评估后不纳入本次）**：① `--source github` 受限网络逐文件兜底下载；② `--skip-venv` 复用已构建 venv。二者改动面大、非核心，留待后续。
+
+## v2.9.0 · 2026-08-19（结构化列解析 --tabular-names + 能力边界标注 + 流程梳理）
+
+- **新增 `--tabular-names`（结构化列解析，零依赖、离线）**：对 CSV/TSV 解析首行列头，识别「姓名类标签」列（精确匹配 + 排除 phone/address/email 等后缀，避免 BuyerPhone 误判），对该列的 Title Case 二词英文姓名（John Smith / Hans Müller，含拉丁重音）按词保留首字母脱敏（`J*** S****`）。复用现有 `--names` 机制精确匹配，**商品名/地址列零误伤**。泰文/越南文等非拉丁姓名与 xlsx 抽取（空格分隔、列对齐不可靠）不在范围，需 `--names` 名单。
+- **英文姓名能力边界（NER 暂不引入）**：默认（不开启增强）英文/多语言姓名不识别；表格 CSV/TSV 用 `--tabular-names`、自由文本（docx 段落/邮件）与多语言姓名需 NER 模型或 `--names`。**NER 需联网下载模型，违背项目「离线、最小依赖」原则，暂不引入**，仅保留 `--names` 名单兜底（文档已标注边界）。
+- **`name` 类别掩码增强**：英文姓名（含空格）按词保留首字母（`John Smith → J*** S****`），中文姓名仍保留首字（`张三 → 张*`）。
+- **交互优化**：scan/run 开头打印增加 `[结构化列解析开启]` 状态提示（对齐既有 `[中文增强开启]`/`[公开声明豁免已启用]` 等）。
+- **文档**：SKILL.md / references/reference.md / README.md / CHANGELOG.md 同步；版本 v2.8.0 → v2.9.0。
+
+## v2.8.0 · 2026-08-19（跨境电商识别扩展：IBAN/SWIFT/VAT + 国际电话 + 多编码 + 全角 + 数据文件密钥）
+
+- **新增跨境银行/税务标识识别**：`iban`（MOD-97 校验）、`swift`（ISO 国家码校验）、`vat`（欧盟/EEA 国家码限定），堵住欧盟跨境收付/合同里 IBAN(DE..34位)/SWIFT(BIC)/VAT 税号明文留存的高泄露盲区。误报可控：订单号 `SG123456789`、变量名 `CALLBACK` 等均被国家码/下划线边界校验过滤。
+- **新增国际电话识别**：`intl_phone`（`+` 国家码 + 号码组，含 `+1/+44/+65/+66` 等），解决北美/东南亚买家电话明文留存。
+- **编码探测扩展**：`BOM → UTF-8 → charset_normalizer → GB18030 → cp1252` 自动探测，新增支持 cp932(Shift-JIS)、big5、cp1252——日本乐天/Amazon JP、港台繁体、Windows 拉丁重音不再乱码，非 ASCII PII 可读、可脱敏。新增依赖 `charset_normalizer`（纯 Python、离线，作为 requests 传递依赖已随装，显式声明于 requirements.txt）。
+- **全角归一**：文本预处理把全角数字/字母/空格归一为半角（fullwidth→halfwidth），全角手机/身份证/银行卡（１３８００１３８０００ 等）正常识别脱敏。
+- **SECRET_PATTERN 扩展至 csv/json**：跨境电商常把 API key/access_token 写在 CSV 导出、JSON 配置里（GA token、Stripe api_key），此前仅 code/config/sql/html 生效 → 明文留存；现 csv/json 一并启用密钥检测（`access_token=…`、`"api_key":"…"` 形态）。
+- **--mapping 澄清（非缺陷）**：确认 `--mapping` 用 `=` 或 TAB 分隔格式（load_custom_mapping），逗号格式系格式误用；文档已强调格式。
+- **新增跨境电商测试套件**：`test_suite/gen_crossborder_fixtures.py`（26 文件跨境电商 + 异常边界夹具）+ `run_crossborder_tests.py`（CB1–CB23，基线 PASS 20 / KNOWN_LIMIT 3 / FAIL 0）+ `TEST_REPORT_CROSSBORDER.md` + `跨境电商异常边界测试SOP.md`；接入 `run_all.sh`。
+- **剩余边界（KNOWN_LIMIT，属 NER/OCR 范畴非正则可解）**：① 英文/多语言姓名（John Smith/สมชาย ศรี）纯正则无法与商品名/地址区分，需 NER 或结构化列解析，当前用 `--names` 名单召回；② 图片型 PDF 须先 preprocess(OCR)。
+- **文档**：SKILL.md / references/reference.md / README.md / CHANGELOG.md 同步；版本 v2.7.0 → v2.8.0。
+
 ## v2.7.0 · 2026-08-18（结构重构 + 用户体验优化：A+B+C 全面梳理）
 
 - **新增 `guide` 子命令（决策表进代码）**：内置结构化 `GUIDE_TEXT`（闸门决策表 + 命令链 + 快速开始），作为「一张图看懂流程」在代码里的单一来源；SKILL.md「一张图看懂流程」与 reference.md §0 决策表均与其对齐。

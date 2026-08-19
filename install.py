@@ -425,7 +425,9 @@ def verify(skill_dir: Path, py: Path, skip=False):
         # 此处额外传 --public-manifest /dev/null 关闭自动清单发现，使校验彻底免疫于
         # 任何豁免声明（即使环境里恰好存在 .nodesens 也不影响本校验）。
         sample = tmp / "pii_input.txt"
-        sample.write_text(SAMPLE_TEXT, encoding="utf-8")
+        # newline=""：保留 LF 原始换行，避免 Windows 文本模式把样本预先翻成 CRLF
+        # 而掩盖「还原=原文」的真实一致性（此前只在 Windows 偶然暴露换行 bug）。
+        sample.write_text(SAMPLE_TEXT, encoding="utf-8", newline="")
         names = tmp / "names.txt"
         names.write_text(SAMPLE_NAME + "\n", encoding="utf-8")
 
@@ -476,6 +478,29 @@ def verify(skill_dir: Path, py: Path, skip=False):
         results.append(("restore 回填闭环", ok,
                          "回填副本与原始逐字节一致" if ok
                          else "rc=%d roundtrip=%s" % (r.returncode, roundtrip)))
+
+        # 5) CRLF 样本：Windows 文本模式会把 \n 二次翻译为 \r\n，导致还原换行翻倍。
+        #    以 CRLF 原文跑全环，验证 newline="" 修复后 CRLF 也逐字节一致（跨平台捕获换行 bug）。
+        crlf_sample = tmp / "pii_crlf.txt"
+        crlf_sample.write_text(SAMPLE_TEXT.replace("\n", "\r\n"),
+                               encoding="utf-8", newline="")
+        crlf_des = tmp / "desensitized_crlf"
+        crlf_keys = tmp / ".desensitize_keys_crlf"
+        run_check(py, script,
+                  ["run", str(crlf_sample), "--mode", "hybrid",
+                   "--out", str(crlf_des), "--keys", str(crlf_keys),
+                   "--public-manifest", os.devnull])
+        crlf_restored = tmp / "restored_crlf"
+        r2 = run_check(py, script,
+                       ["restore", "--keys", str(crlf_keys),
+                        "--input", str(crlf_des), "--out", str(crlf_restored)])
+        crlf_file = crlf_restored / "pii_crlf.txt"
+        crlf_roundtrip = crlf_file.exists() and \
+            (crlf_file.read_bytes() == crlf_sample.read_bytes())
+        ok2 = (r2.returncode == 0) and crlf_roundtrip
+        results.append(("restore 回填闭环（CRLF）", ok2,
+                         "CRLF 原文回填逐字节一致" if ok2
+                         else "rc=%d CRLF roundtrip=%s" % (r2.returncode, crlf_roundtrip)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return results

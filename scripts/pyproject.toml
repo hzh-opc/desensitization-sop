@@ -15,6 +15,7 @@ dependencies = [
     "msoffcrypto-tool>=6.0.0",# 本地解密 Office
     "rapidocr>=3.9",          # 本地 OCR（模型随 wheel 捆绑，完全离线）
     "onnxruntime>=1.19",      # rapidocr 推理后端
+    "charset-normalizer>=3.0",# 编码探测（cp932/Shift-JIS、big5、cp1252、gb18030；纯 Python 离线）
 ]
 
 [project.optional-dependencies]

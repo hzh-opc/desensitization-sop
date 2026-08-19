@@ -76,3 +76,13 @@ python3 upgrade.py --dry-run  # download + verify, but do NOT swap in (safest tr
 ```
 
 `upgrade.py` downloads the new version into a **staging directory on the same filesystem** as the live skill, builds its venv and runs the `scan → run → decrypt → restore` round-trip on the staged copy (**rejects the swap if verification fails**), then renames the live skill to a backup and atomically renames the staged copy into place — re-verifying afterward and **auto-rolling-back on failure**. The live skill is never touched until verification passes, so a failed upgrade cannot break the skill's callability.
+
+## 6. Troubleshooting
+
+- **受限网络（github.com / codeload.github.com 不可达，但 api.github.com、raw.githubusercontent.com 可达）**：改用本地源离线安装/升级：
+  ```bash
+  python3 upgrade.py --source local --local-path /path/to/desensitization-sop
+  python3 install.py  --source local --local-path /path/to/desensitization-sop
+  ```
+- **Windows 下还原与原文件逐字节不一致（换行翻倍）**：v2.9.1 已修复 CRLF 双倍换行（读写统一 `newline=""`，根因是 `_read_text` 二进制读保留 `\r\n`、写出却走默认文本模式被 Windows 二次翻译）。若仍遇不一致，优先怀疑文本模式换行翻译，升级到 v2.9.1+ 后重试；校验门已新增 CRLF 样本的全环逐字节比对，可在任意平台捕获此类问题。
+- **Agent 沙箱内安装/升级被 safe-delete shim 拦截**：`install.py`/`upgrade.py` 已内置 `_neutralize_safe_delete_shim()` 剥离 `CODEBUDDY_SESSION_ID`/`CLAUDE_SESSION_ID`。个别沙箱剥离可能晚于 `sitecustomize` 注入时机，最稳妥是在 shell 先 `unset CODEBUDDY_SESSION_ID CLAUDE_SESSION_ID` 再运行安装/升级。

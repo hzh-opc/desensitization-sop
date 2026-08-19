@@ -207,6 +207,67 @@ def _download_zip_robust(repo_url, dest, branch):
     return _download_zip_no_proxy(repo_url, dest, branch)
 
 
+def _download_via_api(repo_url, dest: Path, branch, opener=None):
+    """GitHub API tree + raw.githubusercontent.com 逐文件兜底下载。
+
+    覆盖「github.com:443 被拦截 / codeload.github.com 404，但 api.github.com 与
+    raw.githubusercontent.com 可达」的受限网络——作为 git clone / zip 两级降级之外的
+    最后一级兜底。逐文件下载，跳过 COPY_IGNORE 应忽略项。opener 传 _no_proxy_opener()
+    可绕过代理。
+    """
+    import json as _json
+    import re as _re
+    import urllib.request
+    m = _re.search(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url.rstrip("/"))
+    if not m:
+        return False
+    owner, repo = m.group(1), m.group(2)
+    api_tree = ("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1"
+                % (owner, repo, branch))
+    raw_base = "https://raw.githubusercontent.com/%s/%s/%s" % (owner, repo, branch)
+    log("尝试 GitHub API 逐文件兜底：%s" % api_tree)
+    opener = opener or urllib.request.build_opener()
+    try:
+        req = urllib.request.Request(api_tree, headers={"User-Agent": "desen-sop-upgrade"})
+        with opener.open(req, timeout=30) as resp:
+            data = _json.loads(resp.read().decode("utf-8", "ignore"))
+    except Exception as e:  # noqa: BLE001
+        log("API tree 获取失败：%s" % e, "WARN")
+        return False
+    entries = data.get("tree", []) if isinstance(data, dict) else []
+    blobs = [e for e in entries if e.get("type") == "blob"]
+    if not blobs:
+        log("API tree 无文件条目（branch=%s）" % branch, "WARN")
+        return False
+    ok = 0
+    for e in blobs:
+        path = e.get("path", "")
+        if not path or any(seg in COPY_IGNORE for seg in path.split("/")) \
+                or path.endswith(COPY_IGNORE_SUFFIX):
+            continue
+        try:
+            local = dest / path
+            local.parent.mkdir(parents=True, exist_ok=True)
+            req = urllib.request.Request(raw_base + "/" + path,
+                                         headers={"User-Agent": "desen-sop-upgrade"})
+            with opener.open(req, timeout=30) as resp:
+                local.write_bytes(resp.read())
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            log("  [跳过] 下载失败 %s：%s" % (path, e), "WARN")
+    if ok == 0:
+        return False
+    log("API 逐文件下载完成：%d 个文件" % ok)
+    return True
+
+
+def _download_via_api_robust(repo_url, dest, branch):
+    if _download_via_api(repo_url, dest, branch):
+        return True
+    log("API 下载失败（可能受代理影响），尝试绕过代理重试……", "WARN")
+    return _download_via_api(repo_url, dest, branch, opener=_no_proxy_opener())
+
+
 # --------------------------------------------------------------------------- #
 # 暂存下载（复用 install 的 clone / zip 降级）
 # --------------------------------------------------------------------------- #
@@ -232,11 +293,14 @@ def download_to_staging(source, local_path, staging: Path, force):
         shutil.copytree(str(local_path), str(staging), ignore=ignore)
         return True
 
-    # GitHub 源：git 优先，zip 降级（与 install 一致）；二者均带代理兜底重试
+    # GitHub 源：git 优先，zip 降级，最后 GitHub API 逐文件兜底（三者均带代理兜底重试）
     if _clone_with_git_robust(REPO_URL, staging, DEFAULT_BRANCH):
         return True
     log("git clone 失败，尝试 zip 降级下载……", "WARN")
     if _download_zip_robust(REPO_URL, staging, DEFAULT_BRANCH):
+        return True
+    log("zip 降级失败，尝试 GitHub API 逐文件兜底下载……", "WARN")
+    if _download_via_api_robust(REPO_URL, staging, DEFAULT_BRANCH):
         return True
     log("从 GitHub 下载技能失败（请检查网络，或使用 --source local 离线升级）。", "FAIL")
     return False

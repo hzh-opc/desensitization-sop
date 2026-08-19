@@ -101,6 +101,10 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 #       ② 仍阻止"在更长字母/数字串内部"误匹配（如 a138... / 138…9 不误命中）。
 _BOUND_L = r"(?<![0-9A-Za-z])"
 _BOUND_R = r"(?![0-9A-Za-z])"
+# 跨境标识（iban/swift/vat/intl_phone）用更严边界：额外排除下划线，避免把
+# 变量名里的全大写英文词误判（如 WEBHOOK_CALLBACK_IP 的 CALLBACK 被当 SWIFT）。
+_BOUND_L_ = r"(?<![0-9A-Za-z_])"
+_BOUND_R_ = r"(?![0-9A-Za-z_])"
 
 PATTERNS = {
     "id_card": re.compile(_BOUND_L + r"[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]" + _BOUND_R),
@@ -113,7 +117,175 @@ PATTERNS = {
     # JWT（JSON Web Token）：eyJ 开头、三段 base64url。日志/配置中高频明文泄漏点，
     # 特征极强（eyJ 前缀 + 三段点分隔），误报风险低，对所有文本生效。
     "jwt": re.compile(_BOUND_L + r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}" + _BOUND_R),
+    # 跨境银行/税务标识（匹配后须经校验：IBAN 用 MOD-97，SWIFT/VAT 用 ISO 国家码，见下方校验函数）。
+    # IBAN：2 字母国家码 + 2 位校验码 + 11~30 位字母数字（总长 15~34）。
+    "iban": re.compile(_BOUND_L_ + r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}" + _BOUND_R_),
+    # SWIFT/BIC：4 字母银行码 + 2 字母国家码 + 2 字母数字地区码 + 可选 3 位分行码（8 或 11 位）。
+    "swift": re.compile(_BOUND_L_ + r"[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?" + _BOUND_R_),
+    # VAT 增值税号：2 字母国家码 + 8~12 位数字（各国格式不一，靠欧盟/EEA 国家码校验降误报）。
+    "vat": re.compile(_BOUND_L_ + r"[A-Z]{2}\d{8,12}" + _BOUND_R_),
+    # 国际电话：+ 号 + 国家码(1~3 位) + 数字组（空格/横线/点分隔，含括号）。特征强、误报低。
+    "intl_phone": re.compile(_BOUND_L_ + r"\+[1-9]\d{0,3}[\d\s.\-()]{4,18}\d" + _BOUND_R_),
 }
+
+# ISO 3166-1 alpha-2 国家码（249 个，用于 SWIFT/VAT 的国别校验，降低误报）
+_ISO_ALPHA2 = set("""AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ
+BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ
+DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP
+GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI
+KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP
+MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM
+PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX
+SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU
+WF WS YE YT ZA ZM ZW""".split())
+
+
+def _valid_iban(s: str) -> bool:
+    """IBAN MOD-97 校验：前 4 位移到末尾、字母转数字(A=10..Z=35)、mod 97 应 == 1。"""
+    if not (15 <= len(s) <= 34):
+        return False
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]+", s):
+        return False
+    rearranged = s[4:] + s[:4]
+    digits = "".join(str(int(ch, 36)) for ch in rearranged)
+    try:
+        return int(digits) % 97 == 1
+    except ValueError:
+        return False
+
+
+def _valid_country(code: str) -> bool:
+    """SWIFT/BIC 的国家码是否为合法 ISO 3166-1 alpha-2（SWIFT 覆盖全球）。"""
+    return code in _ISO_ALPHA2
+
+
+# VAT 增值税号的国家码限定为「欧盟 + 欧洲经济区 + 瑞士」（VAT 为欧洲税制），
+# 避免把东南亚/北美等「国家码前缀 + 数字」的订单号/流水号（如 SG123456789、
+# MY987654321、TH555444333）误判为 VAT。
+_EU_VAT_CODES = set(
+    "AT BE BG CY CZ DE DK EE ES FI FR GB GR HR HU IE IT LT LU LV MT NL NO PL PT RO "
+    "SE SI SK CH IS LI".split()
+)
+
+
+# 各类别的校验器（None 表示无额外校验）；校验失败则不脱敏（保留原样，降低误报）
+_KIND_VALIDATOR = {
+    "iban": _valid_iban,
+    "swift": lambda s: _valid_country(s[4:6]),
+    "vat": lambda s: s[0:2] in _EU_VAT_CODES,
+}
+
+# 全角 → 半角归一表：数字０-９、大写Ａ-Ｚ、小写ａ-ｚ、全角空格。用于把全角手机/身份证/
+# 银行卡等归一为半角后再识别（用户从全角输入法/复制网页常带入全角数字，导致漏检）。
+_FULLWIDTH_TABLE = {c: chr(c - 0xFF10 + ord("0")) for c in range(0xFF10, 0xFF1A)}
+_FULLWIDTH_TABLE.update({c: chr(c - 0xFF21 + ord("A")) for c in range(0xFF21, 0xFF3B)})
+_FULLWIDTH_TABLE.update({c: chr(c - 0xFF41 + ord("a")) for c in range(0xFF41, 0xFF5B)})
+_FULLWIDTH_TABLE[0x3000] = " "
+
+
+def _normalize_fullwidth(text: str) -> str:
+    """全角数字/字母/空格归一为半角（仅作用于字符，不改换行等结构）。"""
+    return text.translate(_FULLWIDTH_TABLE)
+
+
+# ---------------------------------------------------------------------------
+# 1.1 结构化列解析（--tabular-names）：表格列头英文姓名识别
+# ---------------------------------------------------------------------------
+# 跨境电商订单导出（CSV/TSV）首行为列头，姓名列的值是英文姓名（Title Case 二词）。
+# 纯正则无法区分「John Smith」与「Wireless Earbuds」，但结合列头标签即可可靠识别：
+# 仅当列头命中「姓名类标签」且排除「电话/地址/邮箱」等后缀时，才对该列值做英文姓名识别。
+# 这是零依赖、纯本地、误报可控的方案（NER 需下载模型，暂不引入，见能力边界）。
+
+# Title Case 英文姓名（含拉丁重音）：首字母大写 + 小写，2~3 词（John Smith / Hans Müller）
+_EN_NAME_RE = re.compile(
+    r"^[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'\-]{1,15}(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'\-]{1,15}){1,2}$")
+
+# 姓名列标签（精确匹配；含 name 词根的列头也视为姓名列）
+_TABULAR_NAME_LABELS = {
+    "name", "fullname", "buyername", "customername", "contactname", "recipientname",
+    "consigneename", "shippername", "ownername", "username", "customer", "contact",
+    "influencer", "consignee", "shipper", "recipient", "owner", "buyer", "client",
+    "买家", "姓名", "联系人", "收件人", "寄件人", "客户", "用户名",
+}
+# 排除后缀（含这些词的列头不是姓名列，避免 BuyerPhone/ShippingAddress 误判）
+_TABULAR_NAME_EXCLUDE = ("phone", "address", "email", "tel", "mobile", "ip", "zip",
+                         "city", "country", "电话", "地址", "邮箱", "账号")
+
+
+def _is_tabular_name_col(header: str) -> bool:
+    """判断 CSV/TSV 列头是否为「英文姓名列」（精确匹配标签 + 排除电话/地址/邮箱等后缀）。"""
+    h = header.strip().lower().replace("_", " ").replace("-", " ").replace("  ", " ").strip()
+    if not h:
+        return False
+    if any(k in h for k in _TABULAR_NAME_EXCLUDE):
+        return False
+    if h in _TABULAR_NAME_LABELS or h.endswith("name"):
+        return True
+    return "姓名" in h or "买家" in h
+
+
+def _collect_tabular_names(text: str, delimiter: str) -> set:
+    """解析 CSV/TSV 文本，收集「姓名列」里的英文姓名（Title Case 二词）。
+
+    返回英文姓名集合（复用 names 机制精确匹配脱敏）。仅收集匹配 _EN_NAME_RE 的值，
+    泰文/中文等非拉丁姓名不收集（需 --names 名单兜底）。
+    """
+    names = set()
+    try:
+        import csv as _csv
+        from io import StringIO
+        rows = list(_csv.reader(StringIO(text), delimiter=delimiter))
+    except Exception:
+        return names
+    if not rows:
+        return names
+    name_cols = [i for i, h in enumerate(rows[0]) if _is_tabular_name_col(h)]
+    if not name_cols:
+        return names
+    for row in rows[1:]:
+        for i in name_cols:
+            if i < len(row):
+                v = row[i].strip()
+                if v and _EN_NAME_RE.match(v):
+                    names.add(v)
+    return names
+
+
+def _collect_tabular_names_xlsx(path: str) -> set:
+    """对 xlsx 文件，用 openpyxl 读各 sheet 首行列头，收集「姓名列」的英文姓名。
+
+    与 _collect_tabular_names（CSV/TSV）对应，补齐 --tabular-names 对 xlsx 的覆盖：
+    xlsx 是二进制，抽取为空格分隔文本后列对齐不可靠，故直接读单元格结构做列头解析。
+    复用 names 机制精确匹配脱敏；泰文/中文等非拉丁姓名不收集（需 --names）。
+    """
+    names = set()
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return names
+    try:
+        for ws in wb.worksheets:
+            header = []
+            for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                header = [str(c) if c is not None else "" for c in row]
+                break
+            name_cols = [i for i, h in enumerate(header) if _is_tabular_name_col(h)]
+            if not name_cols:
+                continue
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                for i in name_cols:
+                    if i < len(row) and row[i] is not None:
+                        v = str(row[i]).strip()
+                        if v and _EN_NAME_RE.match(v):
+                            names.add(v)
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+    return names
+
 
 # ---------------------------------------------------------------------------
 # 1.1 中文识别增强正则（--cn-enhance 时启用；纯本地，无需联网/模型）
@@ -245,7 +417,10 @@ CODE_EXTS = {".py", ".js", ".ts", ".go", ".java", ".c", ".cpp", ".rb", ".php",
               ".yml", ".yaml", ".toml", ".env", ".ini", ".sh", ".sql"}
 # 密钥检测扩展：HTML 页面内嵌的 <script> 中常见 adminToken/secret 等赋值，
 # 是真实高频泄漏点，故 html/htm 一并启用 SECRET_PATTERN 密钥检测（分类仍属 TEXT）。
-SECRET_EXTS = CODE_EXTS | {".html", ".htm"}
+# 跨境电商高频把 API key/access_token 写在 CSV 导出、JSON 配置里（GA token、Stripe
+# api_key 等），故 csv/json 一并启用 SECRET_PATTERN（如 csv 的 access_token=…、json 的
+# "api_key":"…" 形态），堵住数据文件内密钥明文留存。
+SECRET_EXTS = CODE_EXTS | {".html", ".htm", ".csv", ".json"}
 TEXT_EXTS = {".txt", ".md", ".csv", ".tsv", ".json", ".log", ".xml", ".html",
              ".htm", ".rst", ".eml"}
 # 二进制/库文件：抽取文本后再脱敏（抽取库缺失时跳过并告警，不崩溃）
@@ -713,11 +888,29 @@ def mask_value(kind: str, value: str) -> str:
         if len(value) > 12:
             return value[:6] + "***" + value[-6:]
         return value[:3] + "***"
+    if kind == "iban" and len(value) >= 15:
+        # 保留前 4 位（国家码+校验位）与末 4 位，中间掩码
+        return value[:4] + "*" * (len(value) - 8) + value[-4:]
+    if kind == "swift" and len(value) >= 8:
+        # 保留前 4 位（银行码）与末 2 位，中间掩码
+        return value[:4] + "*" * (len(value) - 6) + value[-2:]
+    if kind == "vat" and len(value) >= 10:
+        # 保留前 2 位（国家码）与末 4 位，中间掩码
+        return value[:2] + "*" * (len(value) - 6) + value[-4:]
+    if kind == "intl_phone":
+        # 保留 + 号与末 4 位数字（国家码长度 1~3 位不定，不硬拆，避免误导）
+        digits = re.sub(r"\D", "", value)
+        if len(digits) >= 6:
+            return "+" + "*" * (len(digits) - 4) + digits[-4:]
+        return "+" + "*" * max(len(digits) - 2, 1)
     if kind in ("cn_name", "name"):
         # 含生僻字/特殊字符 → 优先全掩码（避免保留高识别度生僻字或破坏格式的特殊字符）
         if _has_rare_or_special(value):
             return "*" * len(value)
-        # 保留姓氏/首字，其余脱敏（原始值仍记录于加密映射表，可逆）
+        # 英文姓名（含空格，如 John Smith）→ 按词保留首字母（J*** S****）
+        if " " in value:
+            return " ".join(w[0] + "*" * (len(w) - 1) for w in value.split() if w)
+        # 中文姓名 → 保留姓氏/首字，其余脱敏（原始值仍记录于加密映射表，可逆）
         return value[0] + "*" * (len(value) - 1)
     if kind == "cn_address":
         return "[地址]"
@@ -770,6 +963,8 @@ def desensitize_text(text: str, mode: str, token_map: dict, counts: dict,
     if patterns is None:
         patterns = PATTERNS
     hits = []
+    # 全角数字/字母归一为半角（全角手机/身份证/银行卡/IBAN 等才能被正则识别）
+    text = _normalize_fullwidth(text)
     result = text
 
     # 3.0 用户自定义脱敏映射（原始值→替换值）：主动精确匹配，命中即替换为用户指定值
@@ -793,8 +988,9 @@ def desensitize_text(text: str, mode: str, token_map: dict, counts: dict,
                 continue
             result = re.sub(re.escape(nm), name_cb, result)
 
-    # 3.2 顺序应用正则（先处理 ID/手机，避免银行卡重复命中）
-    for kind in ["id_card", "phone", "bank_card", "ip", "email", "jwt", "plate", "passport"]:
+    # 3.2 顺序应用正则（先处理 ID/手机，避免银行卡重复命中；跨境标识在数字类之后，互不冲突）
+    for kind in ["id_card", "phone", "bank_card", "ip", "email", "jwt",
+                 "plate", "passport", "iban", "swift", "vat", "intl_phone"]:
         pat = patterns[kind]
         cb = _repl_closure(kind, mode, token_map, counts, hits)
         result = pat.sub(lambda m, _cb=cb: _cb(m), result)
@@ -821,6 +1017,10 @@ def _repl_closure(kind: str, mode: str, token_map: dict, counts: dict, hits: lis
         # 已被 ID/手机占位覆盖的纯数字段不应再当银行卡
         if kind == "bank_card" and set(seg) <= set("*"):
             return seg
+        # 跨境标识（iban/swift/vat）须经校验（MOD-97 / ISO 国家码），校验失败不脱敏（降误报）
+        validator = _KIND_VALIDATOR.get(kind)
+        if validator is not None and not validator(seg):
+            return seg
         if mode == "redact":
             repl = redact_value(kind, seg)
         elif mode == "token":
@@ -846,15 +1046,40 @@ def scan_text(text: str, names: set = None, patterns=None):
 
 
 def _read_text(path):
-    """读取文本文件并自动探测编码：UTF-8 → GB18030(GBK 超集) → 兜底。
+    """读取文本文件并自动探测编码：BOM → UTF-8 → charset_normalizer → 兜底。
 
-    电商/小微企业导出报表（千川/抖音/拼多多等）常为 GBK/GB2312 编码，此前按
-    UTF-8 强制读取会中文乱码（数字脱敏仍正常但可读性受损）。现自动探测：先试
-    UTF-8，失败则试 GB18030（GBK 的超集，覆盖常见中文编码），再失败才以
-    errors=replace 兜底。"""
+    电商/小微/跨境导出文件编码混杂：国内报表常为 GBK/GB2312，日本乐天/Amazon JP 为
+    Shift-JIS(cp932)，港台繁体为 BIG5，Windows 拉丁为 cp1252。此前仅 UTF-8→GB18030，
+    日文/繁体/拉丁重音会乱码（非 ASCII PII 不可读、无法脱敏）。现用 charset_normalizer
+    （纯 Python、离线，作为 requests 的传递依赖已随装）探测编码族，覆盖 cp932/big5/
+    cp1252/gb18030 等；探测不可用时回退 UTF-8→GB18030→cp1252→replace。"""
     with open(path, "rb") as f:
         raw = f.read()
-    for enc in ("utf-8", "gb18030"):
+    # 1) BOM 优先（UTF-8-SIG 等带 BOM 文件直接按标记解码）
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig")
+    if raw.startswith(b"\xff\xfe"):
+        return raw.decode("utf-16-le")
+    if raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16-be")
+    # 2) UTF-8 严格解码（现代默认，误判率极低）
+    try:
+        return raw.decode("utf-8")
+    except (UnicodeDecodeError, LookupError):
+        pass
+    # 3) charset_normalizer 探测编码族（cp932/big5/cp1252/gb18030 等）
+    try:
+        from charset_normalizer import from_bytes
+        best = from_bytes(raw).best()
+        if best is not None and best.encoding:
+            try:
+                return raw.decode(best.encoding)
+            except (UnicodeDecodeError, LookupError):
+                pass
+    except Exception:
+        pass
+    # 4) 兜底：GB18030 → cp1252（cp1252 几乎总能解码，仅作最后兜底）
+    for enc in ("gb18030", "cp1252"):
         try:
             return raw.decode(enc)
         except (UnicodeDecodeError, LookupError):
@@ -862,12 +1087,32 @@ def _read_text(path):
     return raw.decode("utf-8", errors="replace")
 
 
+def _write_text_raw(path: str, text: str) -> None:
+    """写文本文件（newline=""：保留原始换行，Windows 不把 \\n 二次翻译为 \\r\\n）。
+
+    与 _read_text（二进制读、保留 \\r\\n）对称，保证「读保留、写不翻译」，
+    使脱敏副本/还原文件与原文件逐字节一致。修复 Windows 下 CRLF 双倍换行 bug
+    （此前写出走默认文本模式，Windows 上 \\r\\n 被翻成 \\r\\n\\r\\n）。
+    """
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def _read_text_plain(path: str) -> str:
+    """读文本文件（newline=""：不做 universal-newline 翻译，保留原始 \\r\\n）。
+
+    供 restore 读取脱敏副本，避免 Windows 读时把 \\r\\n 折叠为 \\n 后再写出造成二次翻译。
+    """
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+        return f.read()
+
+
 def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: dict,
                  mapping: dict, names: set, counts_total: dict, do_write: bool,
                  patterns=None, skipped=None, public_manifests=None,
                  assume_public=False, public_paths=None, local_only=False,
                  local_paths=None, local_out_root=None, cleaning=None,
-                 custom_map=None):
+                 custom_map=None, tabular_names=False):
     """处理单个文件。skipped 为可选 list，用于收集“未处理文件”（skip manifest）。
     public_manifests/assume_public/public_paths 用于“公开声明豁免”：命中则跳过脱敏
     （留痕+警示，绝不静默）。local_only/local_paths 用于“本地处理·无需外发豁免”：
@@ -906,7 +1151,8 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
             return _process_extracted(path, mode, out_root, src_root, token_map,
                                       mapping, names, counts_total, do_write,
                                       patterns, skipped, local_reason, pub_reason,
-                                      local_out_root, custom_map)
+                                      local_out_root, custom_map,
+                                      tabular_names=tabular_names)
         # 既非文本/代码也非可抽取类型：登记为未处理（不静默忽略）
         if ext not in (TEXT_EXTS | CODE_EXTS):
             if skipped is not None:
@@ -931,6 +1177,11 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
                           "文本文件（或 OCR/解密）后再纳入脱敏" % ext)
             return "skipped"
         text = _read_text(path)
+        # 结构化列解析（--tabular-names）：csv/tsv 解析列头，识别姓名列，收集英文姓名并入 names
+        if tabular_names and ext in (".csv", ".tsv"):
+            _tab = _collect_tabular_names(text, "," if ext == ".csv" else "\t")
+            if _tab:
+                names = (names or set()) | _tab
     except Exception as e:
         print("  [跳过] 无法读取 %s: %s" % (path, e), file=sys.stderr)
         _skip(skipped, path, src_root, "error", "读取失败: %s" % e)
@@ -1022,8 +1273,7 @@ def process_file(path: str, mode: str, out_root: str, src_root: str, token_map: 
 
     out_path = os.path.join(out_root, rel_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(new_text)
+    _write_text_raw(out_path, new_text)
     return "processed"
 
 
@@ -1193,10 +1443,15 @@ def _pdf_has_encrypt(path):
 def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
                        names, counts_total, do_write, patterns, skipped,
                        local_reason=None, pub_reason=None, local_out_root=None,
-                       cleaning=None, custom_map=None):
+                       cleaning=None, custom_map=None, tabular_names=False):
     ext = os.path.splitext(path)[1].lower()
     rel_path = os.path.relpath(path, src_root)
     text, missing, reason = _extract_text(ext, path)
+    # 结构化列解析（--tabular-names）：xlsx 用 openpyxl 读列头收集英文姓名（复用 names 机制）
+    if tabular_names and ext == ".xlsx" and names is not None:
+        _tab = _collect_tabular_names_xlsx(path)
+        if _tab:
+            names = (names or set()) | _tab
     if text is None:
         if missing:
             cat, reason = "no_lib", ("缺少抽取库 %s，无法处理该二进制文档：请安装对应库"
@@ -1264,8 +1519,7 @@ def _process_extracted(path, mode, out_root, src_root, token_map, mapping,
         mapping.setdefault(rel_path, []).append(h)
     out_path = os.path.join(out_root, rel_path) + ".txt"
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(new_text)
+    _write_text_raw(out_path, new_text)
     return "processed"
 
 
@@ -1976,8 +2230,7 @@ def cmd_preprocess(args):
                 os.makedirs(os.path.dirname(txt_path) or ocr_dir, exist_ok=True)
                 text, oerr = _ocr_file(dec_path)
                 if text is not None:
-                    with open(txt_path, "w", encoding="utf-8") as f:
-                        f.write(text)
+                    _write_text_raw(txt_path, text)
                     item["preprocessed"] = "decrypted+ocr"
                     item["preprocessed_copy"] = os.path.abspath(txt_path)
                     item["needs_proofread"] = True
@@ -2000,8 +2253,7 @@ def cmd_preprocess(args):
             os.makedirs(os.path.dirname(txt_path) or ocr_dir, exist_ok=True)
             text, oerr = _ocr_file(p)
             if text is not None:
-                with open(txt_path, "w", encoding="utf-8") as f:
-                    f.write(text)
+                _write_text_raw(txt_path, text)
                 item["preprocessed"] = "ocr"
                 item["preprocessed_copy"] = os.path.abspath(txt_path)
                 item["needs_proofread"] = True
@@ -2095,8 +2347,9 @@ def cmd_scan(args):
     total = {}
     cleaning = {}
     skipped = []
-    print("扫描命中（不生成文件）%s%s%s：" % (
+    print("扫描命中（不生成文件）%s%s%s%s：" % (
         "[中文增强开启]" if args.cn_enhance else "",
+        " [结构化列解析开启]" if args.tabular_names else "",
         " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else "",
         " [本地处理豁免已启用]" if (args.local_only or args.local_paths) else ""))
     for p in iter_targets(input_path, args.recursive):
@@ -2104,7 +2357,8 @@ def cmd_scan(args):
                      patterns=patterns, skipped=skipped,
                      public_manifests=public_manifests, assume_public=args.assume_public,
                      public_paths=args.public_paths, local_only=args.local_only,
-                     local_paths=args.local_paths, cleaning=cleaning)
+                     local_paths=args.local_paths, cleaning=cleaning,
+                     tabular_names=args.tabular_names)
     if total:
         print("\n汇总：", json.dumps(total, ensure_ascii=False))
     else:
@@ -2163,9 +2417,10 @@ def cmd_run(args):
     cleaning = {}
     skipped = []
     public_manifests = discover_public_manifests(input_path, getattr(args, "public_manifest", None))
-    print("开始脱敏（模式=%s）%s%s%s..." % (
+    print("开始脱敏（模式=%s）%s%s%s%s..." % (
         args.mode,
         "[中文增强开启]" if args.cn_enhance else "",
+        " [结构化列解析开启]" if args.tabular_names else "",
         " [公开声明豁免已启用]" if (args.assume_public or public_manifests) else "",
         " [本地处理豁免已启用]" if (args.local_only or args.local_paths) else ""))
     for p in iter_targets(input_path, args.recursive):
@@ -2174,7 +2429,8 @@ def cmd_run(args):
                      public_manifests=public_manifests, assume_public=args.assume_public,
                      public_paths=args.public_paths, local_only=args.local_only,
                      local_paths=args.local_paths, local_out_root=local_out_root,
-                     cleaning=cleaning, custom_map=custom_map)
+                     cleaning=cleaning, custom_map=custom_map,
+                     tabular_names=args.tabular_names)
     if cleaning:
         print("")
         print("  ⚠ 清洗建议（未清洗数据形态，未自动脱敏，请先清洗再脱敏）：%s" % cleaning)
@@ -2381,8 +2637,7 @@ def cmd_restore(args):
                 print("  [跳过] 未找到脱敏副本：%s" % rel_path, file=sys.stderr)
                 total_skipped += 1
                 continue
-        with open(cand, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        content = _read_text_plain(cand)
 
         # 构建 replacement -> original；检测多对一歧义（mask 同型/*** 密钥）
         repl_map = {}
@@ -2415,8 +2670,7 @@ def cmd_restore(args):
 
         out_path = os.path.join(out_root, rel_path) + suffix
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        _write_text_raw(out_path, content)
         print("  回填 -> %s （%d 处）" % (os.path.relpath(out_path, out_root), len(repl_map)))
 
     print("\n完成。回填目录: %s" % os.path.abspath(out_root))
@@ -2634,6 +2888,9 @@ def build_parser():
     g.add_argument("--names", help="已知姓名清单文件（每行一个）")
     g.add_argument("--cn-enhance", action="store_true",
                    help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
+    g.add_argument("--tabular-names", action="store_true",
+                   help="结构化列解析：解析 CSV/TSV 首行列头，识别姓名列并脱敏英文姓名"
+                        "（John Smith 等 Title Case 二词；本地正则、离线、零依赖）")
     g = sp.add_argument_group("豁免声明（用户显式声明才跳过脱敏，默认全脱敏）")
     g.add_argument("--assume-public", action="store_true",
                    help="整体声明公开/样例/已脱敏，全部跳过脱敏（仅留痕+警示，不脱敏不计数）")
@@ -2666,6 +2923,9 @@ def build_parser():
     g.add_argument("--names", help="已知姓名清单文件（每行一个）")
     g.add_argument("--cn-enhance", action="store_true",
                    help="中文识别增强：额外识别中文姓名/地址/机构名（本地正则，离线）")
+    g.add_argument("--tabular-names", action="store_true",
+                   help="结构化列解析：解析 CSV/TSV 首行列头，识别姓名列并脱敏英文姓名"
+                        "（John Smith 等 Title Case 二词；本地正则、离线、零依赖）")
     g = rp.add_argument_group("豁免声明（用户显式声明才跳过脱敏，默认全脱敏）")
     g.add_argument("--assume-public", action="store_true",
                    help="整体声明公开/样例/已脱敏，全部跳过脱敏（仅留痕+警示，不脱敏不计数）")

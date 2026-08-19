@@ -10,4 +10,5 @@ pikepdf>=9.11.0            # 本地解密 PDF（封装 QPDF，稳健；运行时
 msoffcrypto-tool>=6.0.0    # 本地解密 Office 文档（运行时依赖）
 rapidocr>=3.9.0            # 本地 OCR：模型随 wheel 捆绑，完全离线、数据不出本机
 onnxruntime>=1.19.0        # rapidocr 推理后端
+charset_normalizer>=3.0.0  # 编码探测（cp932/Shift-JIS、big5、cp1252、gb18030 等；纯 Python、离线）
 # 注意：headless Linux 服务器上 opencv-python 需系统库 libgl1（apt-get install -y libgl1）
