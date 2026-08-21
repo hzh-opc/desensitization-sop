@@ -83,7 +83,7 @@ python scripts/desensitize.py restore --keys ./.desensitize_keys --input ./desen
 
 ---
 
-## 让 Agent 帮你安装（推荐）
+## 使用 AI Agent 辅助安装（推荐）
 
 不想手敲命令？把本仓库交给任意兼容的 AI Agent（WorkBuddy / Claude / Codex / OpenClaw 等），让它照 [`AGENT_INSTALL.md`](AGENT_INSTALL.md) 自动完成「下载技能 → 安装到 `skills/` 目录 → 建 Python 虚拟环境装依赖 → 跑通 `scan`/`run`/`decrypt`/`restore` 全环验证 → 写入常驻检测规则」。你只需在最后按提示确认 AI 工具重新加载技能即可。
 
@@ -305,7 +305,7 @@ A. 这是在 **Agent 会话内**跑 `install.py` 时才会遇到的环境问题�
 | 版本 | v2.4.2 · 2026-08-17 ① 目录/文件布局对齐 skill-creator 规范：`desenstool/`→`scripts/`、`reference.md`→`references/reference.md`、SKILL.md 补全 `agent_created: true`；② 功能与 v2.4 一致（`preprocess` 本地预处理关卡：自动解密加密文档（pikepdf / msoffcrypto-tool）+ 纯本地 OCR（rapidocr + onnxruntime，模型随 wheel 捆绑、完全离线），产出确认单（保存/外发清单、OCR 校对提醒、异常清单、run 闸门）；③ PDF 文本抽取由 pdfminer.six 换成 **pypdfium2**（与 OCR 渲染共用一库）；④ Python 版本明确为标准 CPython ≥3.10 且 <3.14；⑤ 全量回归测试通过（详见 `CHANGELOG.md`） |
 | 原始思路 | 《脱敏资料的处理与生成台》 |
 | 许可 | 见仓库根目录 [`LICENSE`](LICENSE)（本项目采用 **Apache License 2.0**，可自由使用、修改、分发；商用须保留版权与许可声明、标注修改、附 NOTICE）；**所引用的国家标准、行业标准以主管部门官方发布文本为准** |
-| 文件结构 | `SKILL.md`：自动加载的执行规范；`references/reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「让 Agent 帮你安装」指引（agent 视角，照此自动完成安装配置）；`VERSION`：版本唯一来源（install / upgrade 共用）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`/`upgrade.py`/`upgrade.sh`/`upgrade.ps1`：跨平台一键安装 / 卸载 / **手动安全升级**；`scripts/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime / charset_normalizer`），数据不出本机 |
+| 文件结构 | `SKILL.md`：自动加载的执行规范；`references/reference.md`：按需读取的操作详述；`README.md`：本文件（GitHub 项目说明）；`AGENT_INSTALL.md`：「使用 AI Agent 辅助安装」指引（agent 视角，照此自动完成安装配置）；`VERSION`：版本唯一来源（install / upgrade 共用）；`install.py`/`install.sh`/`install.ps1`/`uninstall.py`/`upgrade.py`/`upgrade.sh`/`upgrade.ps1`：跨平台一键安装 / 卸载 / **手动安全升级**；`scripts/`：一键脱敏本地脚本 `desensitize.py` + **uv 工程**（`pyproject.toml` 声明依赖，由 `uv add` 安装 `cryptography / python-docx / openpyxl / python-pptx / pypdfium2 / pikepdf / msoffcrypto-tool / rapidocr / onnxruntime / charset_normalizer`），数据不出本机 |
 
 ---
 
