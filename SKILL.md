@@ -148,7 +148,7 @@ v2.5.0 起**不再自动识别"公开主体"并豁免**（上市公司也有未�
 - 调用：`~/.workbuddy/skills/desensitization-sop/scripts/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py <子命令> ...`
 - 快速指引：`... desensitize.py guide`（打印决策表与命令链）。
 
-**7 个子命令**：`scan`（仅报告命中）/ `preprocess`（解密+OCR+确认单）/ `run`（脱敏+映射表，核心）/ `status`（回显工作区索引）/ `audit`（自动审计文档）/ `decrypt`（本地解密映射表复核）/ `restore`（回填为含原值内部文档）。
+**8 个子命令**：`guide`（流程指引+决策表）/ `scan`（仅报告命中）/ `preprocess`（解密+OCR+确认单）/ `run`（脱敏+映射表，核心）/ `status`（回显工作区索引）/ `audit`（自动审计文档）/ `decrypt`（本地解密映射表复核）/ `restore`（回填为含原值内部文档）。
 
 要点（完整参数与实现细节见 references/reference.md「配套一键脱敏本地脚本」）：
 - `run` 默认 `--mode hybrid`（语义掩码+唯一令牌，可逆、无歧义、保留字段语义）；另有 `mask`/`token`/`redact`。
