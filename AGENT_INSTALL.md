@@ -65,6 +65,14 @@ If the target AI tool was already running, tell the user to **restart it** (or r
 - the mapping keys (`.desensitize_keys/`) **never leave the machine**;
 - automated detection is not 100% — always **review manually** before uploading.
 
+> **⚠️ 常驻检测规则被覆盖？** 部分工具的「记忆文件」由云端缓存/宿主管理（例如 WorkBuddy 的 `~/.workbuddy/MEMORY.md` 会在会话重载时被云端同步回填），安装器写入的常驻闸门可能被冲掉、导致「执行前自动检测」失效。若重启后规则消失，检查该记忆文件是否仍含「任务执行前通用敏感信息检测闸门」小节；若无，可改投**每次会话必加载**的权威文件（如 `~/.workbuddy/SOUL.md`）：
+>
+> ```bash
+> python3 install.py --memory-file ~/.workbuddy/SOUL.md
+> ```
+>
+> （`--memory-file` 支持任意路径覆盖；幂等重装安全，可反复执行。）
+
 ## 5. Upgrading (manual, safe zero-downtime)
 
 The skill ships `upgrade.py` (same paradigm as `install.py`). **Upgrades are manual only** — never auto-upgrade on load. When the user explicitly asks to upgrade/update the skill, run:
@@ -86,3 +94,4 @@ python3 upgrade.py --dry-run  # download + verify, but do NOT swap in (safest tr
   ```
 - **Windows 下还原与原文件逐字节不一致（换行翻倍）**：v2.9.1 已修复 CRLF 双倍换行（读写统一 `newline=""`，根因是 `_read_text` 二进制读保留 `\r\n`、写出却走默认文本模式被 Windows 二次翻译）。若仍遇不一致，优先怀疑文本模式换行翻译，升级到 v2.9.1+ 后重试；校验门已新增 CRLF 样本的全环逐字节比对，可在任意平台捕获此类问题。
 - **Agent 沙箱内安装/升级被 safe-delete shim 拦截**：`install.py`/`upgrade.py` 已内置 `_neutralize_safe_delete_shim()` 剥离 `CODEBUDDY_SESSION_ID`/`CLAUDE_SESSION_ID`。个别沙箱剥离可能晚于 `sitecustomize` 注入时机，最稳妥是在 shell 先 `unset CODEBUDDY_SESSION_ID CLAUDE_SESSION_ID` 再运行安装/升级。
+- **常驻检测闸门失效（记忆文件被云端/宿主覆盖）**：见第 4 步警示——若工具的「记忆文件」会被云端回填（如 WorkBuddy 的 `~/.workbuddy/MEMORY.md`），重跑 `install.py --memory-file <每次会话必加载的文件>`（如 `~/.workbuddy/SOUL.md`）即可把规则写到权威落点。
