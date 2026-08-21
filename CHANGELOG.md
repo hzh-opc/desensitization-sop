@@ -2,6 +2,14 @@
 
 本文件按时间倒序记录重大变更。日常细节以 Git 提交为准。
 
+## v2.11.0 · 2026-08-21（代码合并精简 + 结构重构——不影响功能）
+
+- **拆分识别规则模块 `desen_rules.py`**：正则 / 白名单 / 校验器 / 掩码规则表等纯数据规则拆至独立模块（423 行），`desensitize.py` 3019→2619 行；入口加 `_SELF_DIR` sys.path 兜底，subprocess 与 importlib 两种加载方式均兼容。
+- **mask_value 表驱动化**：8 个「前N后M」同构掩码字段（phone/id_card/bank_card/plate/passport/iban/swift/vat）改为 `_KEEP_MASK_RULES` 规则表，行为逐字段一致；email/ip/jwt/intl_phone/cn_name/兜底保留特殊分支。
+- **合并重复函数**：`_record_public_declared`/`_record_local_only` → 提取 `_file_meta` + `_record_exempt`；`_skip`/`_mk_skip` → 提取 `_make_skip_item`；`_report_skipped` 的 local/pub 重复打印块 → 提取 `_print_exempt_block`。
+- **精简 `upgrade.py`**（563→537 行）：删除 4 个历史残留的代理兜底包装（`fetch_remote_version_via_raw_robust` / `_download_zip_no_proxy` / `_download_zip_robust` / `_download_via_api_robust`），合并为「默认→剥离代理重试」单一实现；修复 `download_to_staging` if/else 同分支冗余；local 复制复用 `install._copy_local`。
+- **文档**：SKILL.md 修正子命令计数 7→8（补 `guide`）；全量回归 6 套 harness 全绿。
+
 ## v2.10.0 · 2026-08-19（网络兜底下载 + xlsx 结构化列解析——落地 2 个 LOW 待办）
 
 - **upgrade.py 网络兜底下载（第三级降级）**：`download_to_staging` 在 git clone / zip 之外新增 **GitHub API tree + raw.githubusercontent.com 逐文件**兜底（`_download_via_api`/`_download_via_api_robust`，含代理绕过重试）。覆盖「github.com:443 被拦截 / codeload 404，但 api.github.com 与 raw.githubusercontent.com 可达」的受限网络；逐文件下载并跳过 `COPY_IGNORE` 应忽略项。

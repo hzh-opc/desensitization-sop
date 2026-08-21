@@ -7,13 +7,13 @@ description: >-
   此外，当任务涉及将本地内容送至云端大模型（WorkBuddy 云端模型、OpenClaw、Claude、Codex、GPT 等）处理时，
   须在「上云前」自动执行脱敏自查，在「任务结束后」自动生成审计汇总。
   本文件仅含执行所必需的最小规则；判定依据、分级对照表、精度影响、工具部署等详述见同目录 references/reference.md（按需读取，不自动加载；GitHub 项目说明见 README.md）。
-version: "2.10.0"
+version: "2.11.0"
 agent_created: true
 ---
 
 # 信息脱敏上云 SOP（AI Agent 上云前 / 上云后闭环）
 
-> **版本** v2.10.0（2026-08-19） · **署名** hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） · **版权** Copyright 2026 hzh.opc，基于 [Apache License 2.0](LICENSE) 发布（保留声明、标注修改、附 NOTICE）。
+> **版本** v2.11.0（2026-08-21） · **署名** hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） · **版权** Copyright 2026 hzh.opc，基于 [Apache License 2.0](LICENSE) 发布（保留声明、标注修改、附 NOTICE）。
 
 核心方针（不可违背）：本地存储优先 · 最小必要 · 分类分级 · 脱敏后上云 · 可溯源 · 留审计 · 云端记忆禁存敏感信息。
 **原始敏感文件永远留本地，绝不整份上传。**
