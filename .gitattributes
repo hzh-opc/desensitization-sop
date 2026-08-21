@@ -1,0 +1,30 @@
+# =============================================================================
+# 跨平台换行统一（基线要求，见 ~/.workbuddy/config/cross-platform.md）
+# 检出时统一转为 LF、提交时按 LF 存储，避免 Windows(CRLF)/Unix(LF) 混用造成的
+# 脚本执行失败与 diff 噪音。配合仓库 .gitignore（scripts/.venv 已排除）使用。
+# =============================================================================
+* text=auto eol=lf
+
+# 明确声明为文本、强制 LF（锁定交付物，杜绝平台差异）
+*.md text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=lf
+*.cmd text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# 二进制资源不转换（防损坏）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.enc binary
+*.bin binary
