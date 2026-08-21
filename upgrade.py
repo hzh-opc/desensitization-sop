@@ -62,8 +62,7 @@ COPY_IGNORE_SUFFIX = _install.COPY_IGNORE_SUFFIX
 detect_tool = _install.detect_tool
 expand = _install.expand
 venv_python = _install.venv_python
-_clone_with_git = _install._clone_with_git
-_download_zip = _install._download_zip
+_copy_local = _install._copy_local
 ensure_venv = _install.ensure_venv
 verify = _install.verify
 _neutralize_safe_delete_shim = _install._neutralize_safe_delete_shim
@@ -114,18 +113,6 @@ def read_local_version(skill_dir: Path):
     return None, None
 
 
-def fetch_remote_version_via_raw():
-    """轻量获取远程最新版本（raw VERSION 文件）。失败返回 None。"""
-    import urllib.request
-    url = "%s/raw/refs/heads/%s/VERSION" % (REPO_URL, DEFAULT_BRANCH)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "desen-sop-upgrade"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return parse_version(resp.read().decode("utf-8", "ignore"))
-    except Exception:  # noqa: BLE001
-        return None
-
-
 # --------------------------------------------------------------------------- #
 # 网络代理兜底：本机 Agent 会话的代理会让 github.com 返回 502（记忆已记载），
 # 故网络调用失败后自动重试「剥离代理」。仅失败时触发，不破坏正常代理环境。
@@ -146,74 +133,75 @@ def _no_proxy_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def fetch_remote_version_via_raw_robust():
-    """获取远程版本；首次失败（多为代理 502）则绕过代理重试。"""
-    v = fetch_remote_version_via_raw()
-    if v is not None:
-        return v
-    log("raw 版本获取失败（可能受代理影响），尝试绕过代理重试……", "WARN")
-    try:
-        url = "%s/raw/refs/heads/%s/VERSION" % (REPO_URL, DEFAULT_BRANCH)
-        req = urllib.request.Request(url, headers={"User-Agent": "desen-sop-upgrade"})
-        with _no_proxy_opener().open(req, timeout=20) as resp:
-            return parse_version(resp.read().decode("utf-8", "ignore"))
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _clone_with_git_robust(repo_url, dest, branch):
-    if _clone_with_git(repo_url, dest, branch):
-        return True
-    log("git clone 失败（可能受代理影响），尝试剥离代理后重试……", "WARN")
-    cmd = ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(dest)]
-    r = subprocess.run(cmd, capture_output=True, text=True, env=_stripped_proxy_env())
-    return r.returncode == 0
-
-
-def _download_zip_no_proxy(repo_url, dest, branch):
+def fetch_remote_version_via_raw():
+    """获取远程最新版本（raw VERSION 文件）；首次失败（多为代理 502）则绕过代理重试。"""
     import urllib.request
-    opener = _no_proxy_opener()
-    for br in (branch, "master", "main"):
-        zip_url = "%s/archive/refs/heads/%s.zip" % (repo_url, br)
+    url = "%s/raw/refs/heads/%s/VERSION" % (REPO_URL, DEFAULT_BRANCH)
+
+    def _fetch(opener):
+        req = urllib.request.Request(url, headers={"User-Agent": "desen-sop-upgrade"})
+        with opener.open(req, timeout=20) as resp:
+            return parse_version(resp.read().decode("utf-8", "ignore"))
+
+    try:
+        return _fetch(urllib.request.build_opener())
+    except Exception:  # noqa: BLE001
+        log("raw 版本获取失败（可能受代理影响），尝试绕过代理重试……", "WARN")
         try:
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
-                req = urllib.request.Request(zip_url, headers={"User-Agent": "desen-sop-upgrade"})
-                with opener.open(req, timeout=60) as resp:
-                    tf.write(resp.read())
-                zpath = tf.name
-            with zipfile.ZipFile(zpath) as zf:
-                top = zf.namelist()[0].split("/")[0]
-                tmp = dest.parent / ("__%s_extract" % SKILL_NAME)
-                if tmp.exists():
-                    shutil.rmtree(tmp)
-                zf.extractall(tmp)
-                src = tmp / top
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.move(str(src), str(dest))
-                shutil.rmtree(tmp, ignore_errors=True)
-            os.unlink(zpath)
+            return _fetch(_no_proxy_opener())
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def _clone_with_git(repo_url, dest, branch):
+    """git clone；默认网络失败后剥离代理重试（覆盖代理 502 场景）。"""
+    cmd = ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(dest)]
+    for env, tag in ((None, "默认"), (_stripped_proxy_env(), "剥离代理")):
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if r.returncode == 0:
             return True
-        except Exception as e:  # noqa: BLE001
-            log("zip 下载/解压失败（%s）：%s" % (br, e), "WARN")
-            continue
+        log("git clone 失败（%s网络），重试……" % tag, "WARN")
     return False
 
 
-def _download_zip_robust(repo_url, dest, branch):
-    if _download_zip(repo_url, dest, branch):
-        return True
-    log("zip 下载失败（可能受代理影响），尝试绕过代理重试……", "WARN")
-    return _download_zip_no_proxy(repo_url, dest, branch)
+def _download_zip(repo_url, dest, branch):
+    """zip 下载；默认网络失败后剥离代理重试（覆盖代理 502 场景）。"""
+    import urllib.request
+    for opener, tag in ((urllib.request.build_opener(), "默认"),
+                        (_no_proxy_opener(), "剥离代理")):
+        for br in (branch, "master", "main"):
+            zip_url = "%s/archive/refs/heads/%s.zip" % (repo_url, br)
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+                    req = urllib.request.Request(zip_url, headers={"User-Agent": "desen-sop-upgrade"})
+                    with opener.open(req, timeout=60) as resp:
+                        tf.write(resp.read())
+                    zpath = tf.name
+                with zipfile.ZipFile(zpath) as zf:
+                    top = zf.namelist()[0].split("/")[0]
+                    tmp = dest.parent / ("__%s_extract" % SKILL_NAME)
+                    if tmp.exists():
+                        shutil.rmtree(tmp)
+                    zf.extractall(tmp)
+                    src = tmp / top
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.move(str(src), str(dest))
+                    shutil.rmtree(tmp, ignore_errors=True)
+                os.unlink(zpath)
+                return True
+            except Exception as e:  # noqa: BLE001
+                log("zip 下载/解压失败（%s/%s）：%s" % (tag, br, e), "WARN")
+                continue
+    return False
 
 
-def _download_via_api(repo_url, dest: Path, branch, opener=None):
+def _download_via_api(repo_url, dest: Path, branch):
     """GitHub API tree + raw.githubusercontent.com 逐文件兜底下载。
 
     覆盖「github.com:443 被拦截 / codeload.github.com 404，但 api.github.com 与
     raw.githubusercontent.com 可达」的受限网络——作为 git clone / zip 两级降级之外的
-    最后一级兜底。逐文件下载，跳过 COPY_IGNORE 应忽略项。opener 传 _no_proxy_opener()
-    可绕过代理。
+    最后一级兜底。逐文件下载，跳过 COPY_IGNORE 应忽略项。默认网络失败后剥离代理重试。
     """
     import json as _json
     import re as _re
@@ -225,60 +213,51 @@ def _download_via_api(repo_url, dest: Path, branch, opener=None):
     api_tree = ("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1"
                 % (owner, repo, branch))
     raw_base = "https://raw.githubusercontent.com/%s/%s/%s" % (owner, repo, branch)
-    log("尝试 GitHub API 逐文件兜底：%s" % api_tree)
-    opener = opener or urllib.request.build_opener()
-    try:
-        req = urllib.request.Request(api_tree, headers={"User-Agent": "desen-sop-upgrade"})
-        with opener.open(req, timeout=30) as resp:
-            data = _json.loads(resp.read().decode("utf-8", "ignore"))
-    except Exception as e:  # noqa: BLE001
-        log("API tree 获取失败：%s" % e, "WARN")
-        return False
-    entries = data.get("tree", []) if isinstance(data, dict) else []
-    blobs = [e for e in entries if e.get("type") == "blob"]
-    if not blobs:
-        log("API tree 无文件条目（branch=%s）" % branch, "WARN")
-        return False
-    ok = 0
-    for e in blobs:
-        path = e.get("path", "")
-        if not path or any(seg in COPY_IGNORE for seg in path.split("/")) \
-                or path.endswith(COPY_IGNORE_SUFFIX):
-            continue
+    for opener, tag in ((urllib.request.build_opener(), "默认"),
+                        (_no_proxy_opener(), "剥离代理")):
+        log("尝试 GitHub API 逐文件兜底（%s网络）：%s" % (tag, api_tree))
         try:
-            local = dest / path
-            local.parent.mkdir(parents=True, exist_ok=True)
-            req = urllib.request.Request(raw_base + "/" + path,
-                                         headers={"User-Agent": "desen-sop-upgrade"})
+            req = urllib.request.Request(api_tree, headers={"User-Agent": "desen-sop-upgrade"})
             with opener.open(req, timeout=30) as resp:
-                local.write_bytes(resp.read())
-            ok += 1
+                data = _json.loads(resp.read().decode("utf-8", "ignore"))
         except Exception as e:  # noqa: BLE001
-            log("  [跳过] 下载失败 %s：%s" % (path, e), "WARN")
-    if ok == 0:
-        return False
-    log("API 逐文件下载完成：%d 个文件" % ok)
-    return True
-
-
-def _download_via_api_robust(repo_url, dest, branch):
-    if _download_via_api(repo_url, dest, branch):
-        return True
-    log("API 下载失败（可能受代理影响），尝试绕过代理重试……", "WARN")
-    return _download_via_api(repo_url, dest, branch, opener=_no_proxy_opener())
+            log("API tree 获取失败（%s）：%s" % (tag, e), "WARN")
+            continue
+        entries = data.get("tree", []) if isinstance(data, dict) else []
+        blobs = [e for e in entries if e.get("type") == "blob"]
+        if not blobs:
+            log("API tree 无文件条目（branch=%s）" % branch, "WARN")
+            return False
+        ok = 0
+        for e in blobs:
+            path = e.get("path", "")
+            if not path or any(seg in COPY_IGNORE for seg in path.split("/")) \
+                    or path.endswith(COPY_IGNORE_SUFFIX):
+                continue
+            try:
+                local = dest / path
+                local.parent.mkdir(parents=True, exist_ok=True)
+                req = urllib.request.Request(raw_base + "/" + path,
+                                             headers={"User-Agent": "desen-sop-upgrade"})
+                with opener.open(req, timeout=30) as resp:
+                    local.write_bytes(resp.read())
+                ok += 1
+            except Exception as e:  # noqa: BLE001
+                log("  [跳过] 下载失败 %s：%s" % (path, e), "WARN")
+        if ok > 0:
+            log("API 逐文件下载完成：%d 个文件" % ok)
+            return True
+        log("API 下载 0 个文件（%s网络），重试……" % tag, "WARN")
+    return False
 
 
 # --------------------------------------------------------------------------- #
 # 暂存下载（复用 install 的 clone / zip 降级）
 # --------------------------------------------------------------------------- #
 def download_to_staging(source, local_path, staging: Path, force):
-    """把新版本下载到 staging（已存在则按 force 决定覆盖）。返回是否成功。"""
+    """把新版本下载到 staging（残留则清掉重来）。返回是否成功。"""
     if staging.exists():
-        if not force:
-            # 暂存区残留：清掉重来
-            shutil.rmtree(staging, ignore_errors=True)
-        else:
-            shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
 
     if source == "local":
         if not local_path or not local_path.exists():
@@ -286,21 +265,16 @@ def download_to_staging(source, local_path, staging: Path, force):
             return False
         log("从本地复制技能到暂存区：%s" % local_path)
         # 复用 install 的本地复制（忽略 .venv / __pycache__ / .git 等）
-        def ignore(_d, names):
-            ig = [n for n in names if n in COPY_IGNORE]
-            ig += [n for n in names if n.endswith(COPY_IGNORE_SUFFIX)]
-            return ig
-        shutil.copytree(str(local_path), str(staging), ignore=ignore)
-        return True
+        return _copy_local(local_path, staging)
 
     # GitHub 源：git 优先，zip 降级，最后 GitHub API 逐文件兜底（三者均带代理兜底重试）
-    if _clone_with_git_robust(REPO_URL, staging, DEFAULT_BRANCH):
+    if _clone_with_git(REPO_URL, staging, DEFAULT_BRANCH):
         return True
     log("git clone 失败，尝试 zip 降级下载……", "WARN")
-    if _download_zip_robust(REPO_URL, staging, DEFAULT_BRANCH):
+    if _download_zip(REPO_URL, staging, DEFAULT_BRANCH):
         return True
     log("zip 降级失败，尝试 GitHub API 逐文件兜底下载……", "WARN")
-    if _download_via_api_robust(REPO_URL, staging, DEFAULT_BRANCH):
+    if _download_via_api(REPO_URL, staging, DEFAULT_BRANCH):
         return True
     log("从 GitHub 下载技能失败（请检查网络，或使用 --source local 离线升级）。", "FAIL")
     return False
@@ -438,7 +412,7 @@ def main():
                                     local_ver_src if local_ver_src else "无"))
 
     if args.check:
-        remote_ver = fetch_remote_version_via_raw_robust()
+        remote_ver = fetch_remote_version_via_raw()
         if remote_ver is None:
             log("无法获取远程版本（网络受限？）。可用 `python3 upgrade.py` 直接尝试下载比对。", "WARN")
             sys.exit(0)
@@ -457,7 +431,7 @@ def main():
     staging = skills_dir / (".desen_stage_%s" % ts)
 
     if args.source == "github":
-        remote_ver = fetch_remote_version_via_raw_robust()
+        remote_ver = fetch_remote_version_via_raw()
         log("远程版本（raw）：%s" % (str(remote_ver) if remote_ver else "未知（下载后比对）"))
         if remote_ver is not None and local_ver is not None and remote_ver <= local_ver and not args.force:
             log("远程版本 %s 不高于本地 %s，无需升级（如需强制重装请加 --force）。"
