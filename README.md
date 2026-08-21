@@ -296,6 +296,7 @@ A. 这是在 **Agent 会话内**跑 `install.py` 时才会遇到的环境问题�
 |---|---|
 | 作者 / 维护者 | hzh.opc（Huang Zenghao，由 WorkBuddy 协助整理） |
 | 仓库 | https://github.com/hzh-opc/desensitization-sop |
+| 版本 | v2.11.0 · 2026-08-21 **代码合并精简 + 结构重构（不影响功能）**：① 拆分识别规则模块 `desen_rules.py`（正则/白名单/校验器/掩码规则表，纯数据，`desensitize.py` 3019→2619 行）；② mask_value 8 个同构掩码字段表驱动化（`_KEEP_MASK_RULES`）；③ 合并重复函数（`_file_meta`/`_record_exempt`/`_make_skip_item`/`_print_exempt_block`）；④ 精简 `upgrade.py`（删 4 个代理兜底残留 + 修复 if/else 同分支）；⑤ 全量回归 6 套 harness 全绿 |
 | 版本 | v2.10.0 · 2026-08-19 **网络兜底下载 + xlsx 结构化列解析**：① upgrade.py 新增 GitHub API tree + raw.githubusercontent.com 逐文件兜底下载（git clone / zip 之外的第三级降级，覆盖受限网络）；② `--tabular-names` 扩展覆盖 xlsx（openpyxl 读列头，规避空格分隔文本列对齐不可靠）；③ 跨境电商测试套件 CB1–CB25（PASS 22 / KNOWN_LIMIT 3） |
 | 版本 | v2.9.0 · 2026-08-19 **结构化列解析 + 能力边界标注**：① 新增 `--tabular-names`（结构化列解析）：解析 CSV/TSV 首行列头，识别姓名列（精确匹配 + 排除电话/地址/邮箱后缀），脱敏 Title Case 二词英文姓名（John Smith → `J*** S****`），商品名/地址零误伤，零依赖、纯本地离线；② 英文姓名能力边界：自由文本（docx/邮件）与泰文/越南文等多语言姓名需 NER 模型（**暂不引入**，违背离线·最小依赖原则），用 `--names` 名单兜底；③ `name` 类别掩码增强（英文按词保留首字母）；④ 交互优化（scan/run 状态提示加 `[结构化列解析开启]`）；⑤ 跨境电商测试套件 CB1–CB24（PASS 21 / KNOWN_LIMIT 3） |
 | 版本 | v2.8.0 · 2026-08-19 **跨境电商识别扩展**：① 新增 IBAN（MOD-97 校验）/ SWIFT（ISO 国家码校验）/ VAT（欧盟/EEA 限定）/ 国际电话（`+` 国家码）识别脱敏，堵住欧盟收付/合同与北美/东南亚买家 PII 盲区；② 编码探测扩展（charset_normalizer）：cp932(Shift-JIS)/big5/cp1252，日文/繁体/拉丁重音不乱码；③ 全角数字归一（全角手机/身份证/银行卡正常脱敏）；④ SECRET_PATTERN 扩展至 csv/json（GA token / Stripe api_key 不再明文）；⑤ 新增跨境电商测试套件（CB1–CB23，PASS 20 / KNOWN_LIMIT 3）；⑥ 剩余边界：英文/多语言姓名需 NER、图片 PDF 需 OCR |
