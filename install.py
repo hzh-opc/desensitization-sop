@@ -141,7 +141,7 @@ def banner(title):
 # 路径工具
 # --------------------------------------------------------------------------- #
 def expand(p):
-    return Path(os.path.expanduser(p)).expanduser()
+    return Path(p).expanduser()
 
 
 def venv_python(venv_dir: Path) -> Path:
