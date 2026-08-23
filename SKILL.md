@@ -7,7 +7,7 @@ description: >-
   此外，当任务涉及将本地内容送至云端大模型（WorkBuddy 云端模型、OpenClaw、Claude、Codex、GPT 等）处理时，
   须在「上云前」自动执行脱敏自查，在「任务结束后」自动生成审计汇总。
   本文件仅含执行所必需的最小规则；判定依据、分级对照表、精度影响、工具部署等详述见同目录 references/reference.md（按需读取，不自动加载；GitHub 项目说明见 README.md）。
-version: "2.11.0"
+version: "2.11.1"
 agent_created: true
 ---
 
@@ -144,8 +144,9 @@ v2.5.0 起**不再自动识别"公开主体"并豁免**（上市公司也有未�
 
 ## 一键脱敏本地脚本
 
-位置：`~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py`（uv 工程，`.venv` 含全部依赖，数据全程不出本机）。
-- 调用：`~/.workbuddy/skills/desensitization-sop/scripts/.venv/bin/python ~/.workbuddy/skills/desensitization-sop/scripts/desensitize.py <子命令> ...`
+位置：`<技能目录>/scripts/desensitize.py`（uv 工程，`pyproject.toml` 声明依赖，数据全程不出本机；WorkBuddy 下 `<技能目录>` 即 `~/.workbuddy/skills/desensitization-sop`）。
+- **解释器解析顺序**（便携，install / upgrade / 调用 / 测试一致）：`DESEN_PYTHON`（直接指定解释器，复用现有环境、不新建 venv）→ `DESEN_VENV`（指定 venv 目录）→ `<技能目录>/scripts/.venv`（install.py 默认创建）→ 系统 `python3`。
+- 调用：`<技能目录>/scripts/.venv/bin/python <技能目录>/scripts/desensitize.py <子命令> ...`；若复用现有环境则 `DESEN_PYTHON=/path/to/python <技能目录>/scripts/desensitize.py <子命令> ...`。
 - 快速指引：`... desensitize.py guide`（打印决策表与命令链）。
 
 **8 个子命令**：`guide`（流程指引+决策表）/ `scan`（仅报告命中）/ `preprocess`（解密+OCR+确认单）/ `run`（脱敏+映射表，核心）/ `status`（回显工作区索引）/ `audit`（自动审计文档）/ `decrypt`（本地解密映射表复核）/ `restore`（回填为含原值内部文档）。

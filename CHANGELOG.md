@@ -2,6 +2,14 @@
 
 本文件按时间倒序记录重大变更。日常细节以 Git 提交为准。
 
+## v2.11.1 · 2026-08-23（虚拟环境便携化——指定 venv 不再遗漏 / 不再另建专属环境）
+
+- **统一 venv / 解释器解析机制（单一事实来源）**：`install.py` 新增 `--venv <目录>` / `--python <路径>` 参数与 `DESEN_VENV` / `DESEN_PYTHON` 环境变量；抽出 `resolve_runtime_python`（直接复用解释器，不新建/不管理 venv）与 `resolve_venv_dir`（指定 venv 目录）两个解析函数。解析顺序：`--python` > `--venv` > `DESEN_PYTHON` > `DESEN_VENV` > 默认 `<技能目录>/scripts/.venv`。
+- **指定后绝不另建专属环境**：`ensure_venv` 在显式指定解释器/venv 时直接复用、跳过 venv 创建；uv 路径新增 `UV_PROJECT_ENVIRONMENT=<vd>`，确保 `--venv`/`DESEN_VENV` 指定目录真正生效（此前 uv 永远在 `scripts/.venv` 建 venv，显式指定会被忽略）。
+- **upgrade.py 同步**：导入新解析函数、新增 `--venv`/`--python`，并修正「替换后实测」的 `live_py` 定位——显式指定解释器/venv 不随 rename 移动，需按同一规则重新定位（默认场景仍指向随 rename 落位的 `scripts/.venv`）。
+- **测试套件便携化**：新增 `test_suite/_env.py` 共享解析模块（`DESEN_PYTHON` → `DESEN_VENV` → `<SKILL_DIR>/scripts/.venv` → 本机统一环境 → `python3`），6 个 harness 与 `run_all.sh` 统一改用它，移除硬编码的 `/Users/hzh/...` 与 `~/.workbuddy/workbuddy_env` 绝对路径。
+- **文档**：SKILL.md / references/reference.md / README.md（新增「虚拟环境的便携指定」表）/ AGENT_INSTALL.md / requirements.txt 同步「解释器解析顺序」，移除硬编码 `.venv` 绝对路径示例。
+
 ## v2.11.0 · 2026-08-21（代码合并精简 + 结构重构——不影响功能）
 
 - **拆分识别规则模块 `desen_rules.py`**：正则 / 白名单 / 校验器 / 掩码规则表等纯数据规则拆至独立模块（423 行），`desensitize.py` 3019→2619 行；入口加 `_SELF_DIR` sys.path 兜底，subprocess 与 importlib 两种加载方式均兼容。

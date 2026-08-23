@@ -80,6 +80,7 @@ python scripts/desensitize.py restore --keys ./.desensitize_keys --input ./desen
 > 子命令：`guide`（流程指引+决策表）/ `scan`（报告命中）/ `preprocess`（解密+OCR+确认单）/ `run`（脱敏+映射表）/ `status`（回显工作区索引）/ `decrypt`（本地解密映射表）/ `restore`（回填为含原值内部文档）/ `audit`（自动审计文档）。
 > 脱敏模式默认 `hybrid`（语义掩码+唯一令牌，无歧义恢复且保留字段语义）；另有 `mask` / `token` / `redact`。
 > 中文识别增强：`--cn-enhance`（本地离线，识别中文姓名/地址/机构名）。详见下方「文档导航」。
+> 以上示例的 `python` 泛指「已装好依赖的解释器」；实际调用按「虚拟环境的便携指定」一节选择（默认 `<技能目录>/scripts/.venv/bin/python`，或 `DESEN_PYTHON`/`DESEN_VENV`）。
 
 ---
 
@@ -116,7 +117,7 @@ python /tmp/desensitization-sop/scripts/desensitize.py scan --help
 |---|---|
 | 1 | 自动检测当前 AI 工具，定位其 `skills/` 目录与记忆/指令文件 |
 | 2 | 从 GitHub（`https://github.com/hzh-opc/desensitization-sop`）下载并安装技能（git 优先，失败自动降级 zip；亦支持 `--source local` 离线安装） |
-| 3 | 自动检测 / 创建 Python 虚拟环境（`scripts/.venv`）并安装依赖（**优先 `uv add`**；无 uv 时回退 `venv`+`pip`） |
+| 3 | 自动检测 / 创建 Python 虚拟环境并安装依赖（**优先 `uv add`**；无 uv 时回退 `venv`+`pip`）。默认装到 `scripts/.venv`，可用 `--venv <目录>` / `DESEN_VENV` 指定目录，或 `--python <路径>` / `DESEN_PYTHON` 复用现有解释器（不新建 venv） |
 | 4 | 实测脚本是否正常运行：`scan` → `run(hybrid)` → `decrypt` → `restore` 全环验证 |
 | 5 | 把「任务执行前自动敏感信息检测」设为**常驻规则**（幂等写入记忆文件） |
 
@@ -140,10 +141,25 @@ python3 install.py --tool claude           # 指定目标工具
 python3 install.py --source local --local-path /path/to/skill   # 离线/本地安装
 python3 install.py --force                 # 覆盖已安装技能
 python3 install.py --skip-venv --skip-tests  # 仅下载技能 + 写常驻规则
+python3 install.py --venv /path/to/venv      # 指定 venv 目录（替代 scripts/.venv）
+python3 install.py --python /path/to/python  # 复用现有解释器（不新建 venv）
 ```
 
 > 退出码 `0` = 全部通过；非 `0` = 存在失败项（详见脚本末尾汇总）。
 > Codex / OpenClaw 的记忆文件路径为业界常见约定（`.codex/codex.md` / `.openclaw/AGENTS.md`），如与所用版本不符，可用 `--memory-file` / `--skills-dir` 覆盖。
+
+### 虚拟环境的便携指定（避免「指定了却被忽略 / 另建专属环境」）
+
+脚本、安装器、升级器、文档、测试套件统一遵循同一套解释器解析顺序：
+
+| 优先级 | 来源 | 语义 |
+|---|---|---|
+| 1 | `--python <路径>` / `DESEN_PYTHON` | 直接复用现有解释器（自备依赖），**不新建、不管理 venv** |
+| 2 | `--venv <目录>` / `DESEN_VENV` | 依赖装进指定 venv 目录，替代默认 `scripts/.venv` |
+| 3 | `<技能目录>/scripts/.venv` | install.py 默认创建的专属 venv（向后兼容） |
+| 4 | 系统 `python3` | 兜底 |
+
+只要在安装、升级、运行、测试任一处用 `--venv`/`--python` 或 `DESEN_VENV`/`DESEN_PYTHON` 指定一次，其余环节按同一顺序自动一致，不会出现「漏指定导致报错」或「被忽略而另建专属 `.venv`」。
 
 ---
 

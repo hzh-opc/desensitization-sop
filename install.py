@@ -10,6 +10,7 @@
   2. 从 GitHub (https://github.com/hzh-opc/desensitization-sop) 下载并安装技能
      （git clone 优先，失败自动降级为 zip 下载；亦支持 --local 离线安装）；
   3. 自动检测 / 创建 Python 虚拟环境 (.venv) 并安装依赖；
+     （可用 --venv <目录> / DESEN_VENV 指定 venv 目录，或 --python <路径> / DESEN_PYTHON 复用现有解释器）
   4. 实测脚本是否正常运行：scan / run(hybrid) / decrypt / restore 全环验证；
   5. 把“任务执行前自动敏感信息检测”设为常驻规则（幂等写入记忆文件）。
 
@@ -19,6 +20,9 @@
   python3 install.py --source local --local-path /path/to/skill   # 离线/本地安装
   python3 install.py --force              # 强制覆盖已安装技能
   python3 install.py --skip-venv --skip-tests   # 仅下载技能 + 写常驻规则
+  python3 install.py --venv /path/to/venv        # 指定 venv 目录（替代 scripts/.venv）
+  python3 install.py --python /path/to/python    # 复用现有解释器（不新建 venv）
+  DESEN_VENV=/path/to/venv python3 install.py    # 环境变量等价写法
 
 退出码：0 = 全部通过；非 0 = 存在失败项（详见末尾汇总）。
 """
@@ -90,6 +94,12 @@ COPY_IGNORE_SUFFIX = (".pyc", ".pyo", ".DS_Store")
 # 为常规行为。详见 README FAQ Q11。
 SAFE_DELETE_TRIGGER_VARS = ("CODEBUDDY_SESSION_ID", "CLAUDE_SESSION_ID")
 
+# 虚拟环境 / 解释器「显式指定」的便携机制（单一事实来源，跨 install / upgrade / 文档 / 测试一致）
+# 解析顺序：--python > --venv > DESEN_PYTHON > DESEN_VENV > 默认 <skill_dir>/scripts/.venv。
+# 用户显式指定后，绝不自动重建专属 venv（避免「指定了却被忽略而另建 .venv」）。
+ENV_PYTHON = "DESEN_PYTHON"   # 直接指定 python 可执行文件（复用现有环境、不新建/不管理 venv）
+ENV_VENV = "DESEN_VENV"       # 指定 venv 目录（在该目录创建/复用 venv，替代默认 scripts/.venv）
+
 
 def _neutralize_safe_delete_shim():
     """若处于 Agent 会话（上述环境变量存在），从当前进程环境剥离它们。
@@ -148,6 +158,28 @@ def venv_python(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
     return venv_dir / "bin" / "python"
+
+
+def resolve_runtime_python(cli_python=None):
+    """解析「直接复用」的解释器（--python / DESEN_PYTHON），返回 Path 或 None。
+
+    该路径用于直接执行脚本，不新建、不管理 venv（用户自备依赖）。最高优先级。
+    """
+    p = cli_python or os.environ.get(ENV_PYTHON)
+    if not p:
+        return None
+    return expand(p)
+
+
+def resolve_venv_dir(skill_dir: Path, cli_venv=None):
+    """解析 venv 目录：--venv > DESEN_VENV > 默认 <skill_dir>/scripts/.venv。
+
+    用户显式指定 venv 目录时，依赖装进该目录而非专属 .venv。
+    """
+    v = cli_venv or os.environ.get(ENV_VENV)
+    if v:
+        return expand(v)
+    return skill_dir / "scripts" / ".venv"
 
 
 # --------------------------------------------------------------------------- #
@@ -292,17 +324,33 @@ def _write_minimal_pyproject(scripts: Path):
     )
 
 
-def ensure_venv(skill_dir: Path, skip=False):
+def ensure_venv(skill_dir: Path, skip=False, venv_dir=None, python_path=None):
     """返回 venv 的 python 路径；失败返回 None。
+
+    便携指定（单一事实来源，跨 install / upgrade 一致）：
+      - `python_path`（--python / DESEN_PYTHON）：复用现有解释器，不新建、不管理 venv；
+      - `venv_dir`（--venv / DESEN_VENV）：依赖装进该 venv 目录，替代默认 scripts/.venv；
+      - 均未指定：默认 scripts/.venv（向后兼容）。
 
     依赖管理统一使用 uv（优先），尽量用 `uv add` 声明并安装依赖：
       - scripts 必须是 uv 工程（含 pyproject.toml）；已存在则保留既有声明、不覆盖；
-      - `uv add <deps>` 会把依赖写入 pyproject.toml 并安装进 scripts/.venv
-        （uv 自动创建 .venv，无需 venv 自带 pip，兼容“python -m venv 不含 pip”的精简 Python）；
+      - `uv add <deps>` 会把依赖写入 pyproject.toml 并安装进 venv
+        （uv 自动创建 venv，无需 venv 自带 pip，兼容“python -m venv 不含 pip”的精简 Python）；
       - 回退路径：python -m venv + ensurepip / get-pip.py，再 pip install -r requirements.txt。
     """
     scripts = skill_dir / "scripts"
-    vd = scripts / ".venv"
+
+    # 0) 显式指定解释器（--python / DESEN_PYTHON）：直接复用、绝不新建 venv
+    reuse_py = resolve_runtime_python(cli_python=python_path)
+    if reuse_py is not None:
+        if reuse_py.is_file():
+            log("复用显式指定的 Python 解释器（不新建 / 不管理 venv）：%s" % reuse_py, "OK")
+            return reuse_py
+        log("显式指定的 Python 解释器不存在：%s" % reuse_py, "FAIL")
+        return None
+
+    # venv 目录：--venv / DESEN_VENV > 默认 scripts/.venv
+    vd = resolve_venv_dir(skill_dir, cli_venv=venv_dir)
     py = venv_python(vd)
 
     if skip:
@@ -330,6 +378,9 @@ def ensure_venv(skill_dir: Path, skip=False):
                 "rapidocr", "onnxruntime"]
         log("使用 uv 安装依赖（uv add，可能需联网，请稍候）……")
         env = dict(os.environ)
+        # 把 venv 落到「已解析的 venv 目录」（默认 scripts/.venv 或 --venv/DESEN_VENV 指定处），
+        # 否则 uv 永远在 scripts/.venv 建 venv，显式指定会被忽略而另建专属环境。
+        env["UV_PROJECT_ENVIRONMENT"] = str(vd)
         # 防御性剥离 Agent 安全删除 shim 触发变量（见 _neutralize_safe_delete_shim）。
         for k in SAFE_DELETE_TRIGGER_VARS:
             env.pop(k, None)
@@ -546,6 +597,10 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="覆盖已安装的技能目录")
     ap.add_argument("--skip-venv", action="store_true", help="跳过虚拟环境创建")
+    ap.add_argument("--venv", default=None,
+                    help="指定虚拟环境目录（替代默认 scripts/.venv，创建/复用该目录）")
+    ap.add_argument("--python", default=None,
+                    help="指定 Python 解释器（复用现有环境，不再新建/管理 venv）")
     ap.add_argument("--skip-rule", action="store_true", help="跳过常驻规则写入")
     ap.add_argument("--skip-tests", action="store_true", help="跳过脚本实测")
     args = ap.parse_args()
@@ -584,7 +639,8 @@ def main():
 
     # 3) 虚拟环境 + 依赖
     banner("步骤 2 / 4 · 虚拟环境与依赖")
-    py = ensure_venv(dest, skip=args.skip_venv)
+    py = ensure_venv(dest, skip=args.skip_venv,
+                     venv_dir=args.venv, python_path=args.python)
     if py is None and not args.skip_venv:
         log("虚拟环境/依赖准备失败；后续实测可能受限。", "WARN")
 

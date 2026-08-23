@@ -62,6 +62,8 @@ COPY_IGNORE_SUFFIX = _install.COPY_IGNORE_SUFFIX
 detect_tool = _install.detect_tool
 expand = _install.expand
 venv_python = _install.venv_python
+resolve_runtime_python = _install.resolve_runtime_python
+resolve_venv_dir = _install.resolve_venv_dir
 _copy_local = _install._copy_local
 ensure_venv = _install.ensure_venv
 verify = _install.verify
@@ -370,6 +372,10 @@ def main():
                     help="清理历史备份目录后退出（不执行升级）")
     ap.add_argument("--skip-venv", action="store_true",
                     help="跳过 venv 构建（仅当你确定依赖未变且复用现有 venv 时使用）")
+    ap.add_argument("--venv", default=None,
+                    help="指定虚拟环境目录（替代默认 scripts/.venv，创建/复用该目录）")
+    ap.add_argument("--python", default=None,
+                    help="指定 Python 解释器（复用现有环境，不再新建/管理 venv）")
     ap.add_argument("--skip-tests", action="store_true",
                     help="跳过 scan/run/decrypt/restore 全环实测")
     args = ap.parse_args()
@@ -459,7 +465,8 @@ def main():
 
     # 4) 在暂存副本上构建 venv + 全环实测（校验无误）
     banner("步骤 2 / 5 · 暂存副本构建 venv + 全环实测（校验）")
-    py = ensure_venv(staging, skip=args.skip_venv)
+    py = ensure_venv(staging, skip=args.skip_venv,
+                     venv_dir=args.venv, python_path=args.python)
     if py is None and not args.skip_venv:
         log("暂存副本 venv 构建失败；为避免把『不可用版本』替换到线上，终止升级。线上技能保持不变。",
             "FAIL")
@@ -497,8 +504,14 @@ def main():
         backup = atomic_swap(current, staging, skills_dir)
 
     banner("步骤 4 / 5 · 替换后实测线上技能")
-    # venv_python 接收的是 .venv 目录本身（scripts/.venv），不是 scripts 目录
-    live_py = venv_python(current / "scripts" / ".venv")
+    # 显式指定解释器 / venv 不随 rename 移动，需按同一解析规则定位；
+    # 默认场景 venv 在 <skill_dir>/scripts/.venv（已随 rename 落位）。
+    reuse_py = resolve_runtime_python(cli_python=args.python)
+    if reuse_py is not None:
+        live_py = reuse_py
+    else:
+        live_vd = resolve_venv_dir(current, cli_venv=args.venv)
+        live_py = venv_python(live_vd)
     if not live_py.exists():
         # 复用刚才构建的 venv（已随 rename 落位）
         live_py = py
