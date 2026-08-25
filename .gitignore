@@ -17,3 +17,12 @@ desensitize_audit.md
 
 # Python 工具/缓存
 .pytest_cache/
+
+# 本地开发资料（工作记忆/反馈/开发参考/测试套件，仅留本地，不进 git、不上远程）
+.workbuddy/
+feedback/
+DEV_REFERENCE.md
+test_suite/
+
+# IDE / 安全扫描元数据
+.codebuddy/
