@@ -9,6 +9,7 @@
 - **upgrade.py 同步**：导入新解析函数、新增 `--venv`/`--python`，并修正「替换后实测」的 `live_py` 定位——显式指定解释器/venv 不随 rename 移动，需按同一规则重新定位（默认场景仍指向随 rename 落位的 `scripts/.venv`）。
 - **测试套件便携化**：新增 `test_suite/_env.py` 共享解析模块（`DESEN_PYTHON` → `DESEN_VENV` → `<SKILL_DIR>/scripts/.venv` → 本机统一环境 → `python3`），6 个 harness 与 `run_all.sh` 统一改用它，移除硬编码的 `/Users/hzh/...` 与 `~/.workbuddy/workbuddy_env` 绝对路径。
 - **文档**：SKILL.md / references/reference.md / README.md（新增「虚拟环境的便携指定」表）/ AGENT_INSTALL.md / requirements.txt 同步「解释器解析顺序」，移除硬编码 `.venv` 绝对路径示例。
+- **文档（适用对象对齐）**：README.md / references/reference.md / SKILL.md / AGENT_INSTALL.md / CONTRIBUTING.md 统一补充**适用对象**说明——主要面向个人与企业（政府部门 / 事业单位 / 对数据安全有特别要求的企业等，须遵循其法规与内部规定使用），并明确本技能对全部使用者**全过程可追溯、可审计、可复核**。
 
 ## v2.11.0 · 2026-08-21（代码合并精简 + 结构重构——不影响功能）
 

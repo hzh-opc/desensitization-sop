@@ -2,6 +2,8 @@
 
 You are an AI agent setting up the `desensitization-sop` skill for the user. **Done = `python3 install.py` exits 0** (skill installed, Python venv ready, resident rule written). **Never use `sudo`**; you cannot push to GitHub or pick the user's AI tool for them — Step 4 is the user's job.
 
+> **适用对象（Who it's for）**：本技能主要面向**个人**与**企业**使用——含政府部门、事业单位、对数据安全有特别要求的企业等；此类组织 / 单位使用时**须遵循其适用的法律法规与内部数据安全管理规定**。无论哪类使用者，本技能均保证**全过程可追溯、可审计、可复核**。
+
 ## 1. Get the skill
 
 The skill lives at `https://github.com/hzh-opc/desensitization-sop`. Prefer a fresh clone; fall back to a zip download if `git` is unavailable.
