@@ -145,7 +145,18 @@ v2.5.0 起**不再自动识别"公开主体"并豁免**（上市公司也有未�
 - 调用：`<技能目录>/scripts/.venv/bin/python <技能目录>/scripts/desensitize.py <子命令> ...`；若复用现有环境则 `DESEN_PYTHON=/path/to/python <技能目录>/scripts/desensitize.py <子命令> ...`。
 - 快速指引：`... desensitize.py guide`（打印决策表与命令链）。
 
-**8 个子命令**：`guide`（流程指引+决策表）/ `scan`（仅报告命中）/ `preprocess`（解密+OCR+确认单）/ `run`（脱敏+映射表，核心）/ `status`（回显工作区索引）/ `audit`（自动审计文档）/ `decrypt`（本地解密映射表复核）/ `restore`（回填为含原值内部文档）。
+**8 个子命令速查表**（完整参数见 `... desensitize.py <子命令> --help`）：
+
+| 子命令 | 作用 | 典型用法 |
+|---|---|---|
+| `guide` | 打印流程指引 + 闸门决策表 | `desensitize.py guide` |
+| `scan` | 仅报告命中，不生成文件 | `desensitize.py scan <文件/目录> [--recursive]` |
+| `preprocess` | 本地解密 + 本地 OCR + 预处理确认单 | `desensitize.py preprocess <文件/目录> [--recursive]` |
+| `run` | 脱敏 + 加密映射表（核心，默认 hybrid） | `desensitize.py run <文件/目录> --out ./desensitized --keys ./.desensitize_keys` |
+| `status` | 回显工作区成果索引 | `desensitize.py status --workspace <目录>` |
+| `audit` | 自动生成九节审计文档 | `desensitize.py audit --report ./desensitize_report.json` |
+| `decrypt` | 本地解密映射表、复核可逆性 | `desensitize.py decrypt --keys ./.desensitize_keys` |
+| `restore` | 回填为含原值的本地内部文档 | `desensitize.py restore --keys ./.desensitize_keys --input ./desensitized --out ./restored` |
 
 要点（完整参数与实现细节见 references/reference.md「配套一键脱敏本地脚本」）：
 - `run` 默认 `--mode hybrid`（语义掩码+唯一令牌，可逆、无歧义、保留字段语义）；另有 `mask`/`token`/`redact`。
@@ -155,6 +166,31 @@ v2.5.0 起**不再自动识别"公开主体"并豁免**（上市公司也有未�
 - **跨境识别（v2.8+ 内置）**：IBAN / SWIFT / VAT / 国际电话自动识别脱敏；多编码自动探测（GBK / Shift-JIS / BIG5 / cp1252）；全角数字归一；csv/json 内嵌密钥检测。
 - **能力边界（英文/多语言姓名）**：表格 CSV/TSV/xlsx 的英文姓名用 `--tabular-names`（列头解析，John Smith → J*** S****）；自由文本（docx 段落/邮件）与泰文/越南文等多语言姓名，**NER 模型暂不引入**（需联网下载模型、违背「离线·最小依赖」原则），用 `--names` 名单召回。详见 references/reference.md。
 - **清洗建议**：检测疑似未清洗形态（分隔/短位手机、15 位旧证、订单号与银行卡区间重叠），只提醒不自动改。
+
+## CLI 用法（便携版 S1 / 纯命令行调用）
+
+本组件在 S1 便携版部署下只有 CLI 身份（`components/desensitization-sop/scripts/desensitize.py`），SKILL.md 的「触发词 / 技能用法」对纯 CLI 用户无用，CLI 用户直接以脚本为入口：
+
+```bash
+# 解释器解析（便携顺序：DESEN_PYTHON > DESEN_VENV > scripts/.venv > 系统 python3）
+PY="<技能目录>/scripts/.venv/bin/python"    # 或复用现有环境：export DESEN_PYTHON=/path/to/python
+$PY <技能目录>/scripts/desensitize.py <子命令> ...   # 见上「8 个子命令速查表」
+
+# 已并入 office-kit 套件时，走统一入口（等价）
+python3 ~/office-kit/kit.py desen <子命令> ...
+```
+
+## 双副本入口优先级（套件已装时）
+
+本组件已并入 office-kit 套件（元技能）。当本机**同时**存在以下两份副本时，**以套件副本为权威**：
+
+| 副本 | 路径 | 何时生效 |
+|---|---|---|
+| 套件权威副本 | `~/office-kit/components/desensitization-sop/` | 已装 office-kit 套件时（S2 / S3），走 `kit.py desen` |
+| 独立副本 | `~/.workbuddy/skills/desensitization-sop/` | 仅 S4「仅组件」场景（未装套件）生效 |
+
+- 已装套件时，请走统一入口 `python3 ~/office-kit/kit.py desen <子命令>`，避免双副本版本漂移、入口优先级混淆。
+- 独立安装器（`install.py`）内置双副本守卫：检测到套件副本时提示「双副本风险」，引导走 `kit.py desen` 或 `--force` 明确覆盖。
 
 ## 手动升级（安全零停机 · 仅手动触发）
 
