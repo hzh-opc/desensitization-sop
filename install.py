@@ -100,6 +100,14 @@ SAFE_DELETE_TRIGGER_VARS = ("CODEBUDDY_SESSION_ID", "CLAUDE_SESSION_ID")
 ENV_PYTHON = "DESEN_PYTHON"   # 直接指定 python 可执行文件（复用现有环境、不新建/不管理 venv）
 ENV_VENV = "DESEN_VENV"       # 指定 venv 目录（在该目录创建/复用 venv，替代默认 scripts/.venv）
 
+# office-kit 套件集成（2026-09-02，组件反馈 P1-① / 🆕-H）：
+# 本组件已并入 office-kit 套件（元技能），套件内权威副本为 components/desensitization-sop。
+# 独立安装到 skills/ 会与之形成「双副本并存、无版本同步」，故安装器须检测并提示，
+# 引导走统一入口 kit.py desen 或 --force 明确覆盖。
+OFFICE_KIT_COMPONENT_DIR = "components"            # 套件内组件目录名
+OFFICE_KIT_DEFAULT_ROOT = "~/office-kit"           # 套件默认安装根目录
+OFFICE_KIT_ENV_ROOT = "OFFICE_KIT_ROOT"            # kit.py 注入的环境变量（指向套件根）
+
 
 def _neutralize_safe_delete_shim():
     """若处于 Agent 会话（上述环境变量存在），从当前进程环境剥离它们。
@@ -200,6 +208,26 @@ def detect_tool(explicit):
     # 3) 都未安装：默认按 WorkBuddy 约定安装
     log("未检测到任何已安装的 AI 工具，将按 WorkBuddy 约定安装。", "WARN")
     return "workbuddy"
+
+
+def find_office_kit_component():
+    """返回 office-kit 套件中本组件的权威副本目录；未安装套件则返回 None。
+
+    检测来源（命中任一即认为套件已含本组件，P1-①）：
+      1) OFFICE_KIT_ROOT 环境变量（kit.py 注入）→ <root>/components/desensitization-sop
+      2) 常见安装根 ~/office-kit → <root>/components/desensitization-sop
+    """
+    candidates = []
+    env_root = os.environ.get(OFFICE_KIT_ENV_ROOT)
+    if env_root:
+        candidates.append(expand(env_root))
+    candidates.append(expand(OFFICE_KIT_DEFAULT_ROOT))
+    for root in candidates:
+        comp = root / OFFICE_KIT_COMPONENT_DIR / SKILL_NAME
+        # 以组件标志文件判定（manifest.json 为套件集成专属；SKILL.md 为兜底）
+        if (comp / "manifest.json").is_file() or (comp / "SKILL.md").is_file():
+            return comp
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -560,6 +588,34 @@ def verify(skill_dir: Path, py: Path, skip=False):
 # --------------------------------------------------------------------------- #
 # 常驻规则写入
 # --------------------------------------------------------------------------- #
+def _equivalent_rule_sources(memory_file: Path):
+    """返回已固化「等价常驻规则」的来源列表（跨源去重，P1-②）。
+
+    常驻规则（任务执行前敏感信息检测闸门）除写入目标记忆文件外，可能已由以下
+    更权威处承接，重复写入会导致多源漂移、冗余占位：
+      1) WorkBuddy 的 SOUL.md（已固化「敏感信息检测闸门（常驻铁律）」）；
+      2) office-kit 套件（其 SKILL.md 已沉淀脱敏铁律）。
+    命中任一即返回来源名，调用方据此跳过写入并标注来源。
+    """
+    found = []
+    # 1) SOUL.md（仅 WorkBuddy 场景有意义：memory_file 为 ~/.workbuddy/MEMORY.md，
+    #    同目录存在 SOUL.md；其他工具的 memory_file 同目录通常无 SOUL.md，自然跳过）
+    soul = memory_file.parent / "SOUL.md"
+    if soul.is_file():
+        txt = soul.read_text(encoding="utf-8", errors="ignore")
+        if "敏感信息检测闸门" in txt or ("desensitization-sop" in txt and "脱敏" in txt):
+            found.append("SOUL.md（常驻铁律）")
+    # 2) office-kit 套件（脱敏铁律已沉淀于套件 SKILL.md）
+    kit_comp = find_office_kit_component()
+    if kit_comp is not None:
+        kit_skill = kit_comp / "SKILL.md"
+        if kit_skill.is_file():
+            txt = kit_skill.read_text(encoding="utf-8", errors="ignore")
+            if "敏感" in txt and "脱敏" in txt:
+                found.append("office-kit 套件（脱敏铁律）")
+    return found
+
+
 def install_rule(memory_file: Path, skip=False):
     if skip:
         return True, "通过 --skip-rule"
@@ -569,6 +625,12 @@ def install_rule(memory_file: Path, skip=False):
         content = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
         if RULE_MARKER in content:
             return True, "常驻规则已存在，跳过（幂等）"
+        # 跨源去重（P1-②）：识别 SOUL.md / office-kit 套件已固化的等价规则，
+        # 命中则跳过写入并标注来源，避免多源重复、漂移。
+        eq_sources = _equivalent_rule_sources(memory_file)
+        if eq_sources:
+            return True, "检测到等价常驻规则已由「%s」承接，跳过写入（跨源去重，避免重复）" \
+                % "、".join(eq_sources)
         sep = "" if not content or content.endswith("\n") else "\n"
         with memory_file.open("a", encoding="utf-8") as f:
             f.write(sep + "\n" + RULE_BLOCK)
@@ -630,6 +692,19 @@ def main():
     skills_dir.mkdir(parents=True, exist_ok=True)
     dest = skills_dir / SKILL_NAME
 
+    # 1.5) 双副本守卫（P1-① / 🆕-H）：检测 office-kit 套件是否已含本组件权威副本。
+    #      独立安装到 skills/ 会与套件 components/ 形成「双副本并存、无版本同步、
+    #      入口优先级未定」，故安装前提示并引导走统一入口 kit.py desen 或 --force。
+    kit_comp = find_office_kit_component()
+    if kit_comp is not None and kit_comp != dest:
+        log("检测到 office-kit 套件已包含本组件权威副本：%s" % kit_comp, "WARN")
+        log("继续独立安装将形成「双副本并存、无版本同步」。", "WARN")
+        if not args.force:
+            log("建议改走套件统一入口：python3 ~/office-kit/kit.py desen <子命令>（组件已并入套件）。", "WARN")
+            log("若确需独立安装（仅组件场景 S4），请加 --force 明确覆盖。", "WARN")
+        else:
+            log("已指定 --force：独立副本将覆盖 skills/ 下同名目录；套件 components/ 副本仍为权威，独立副本仅 S4 场景生效。", "WARN")
+
     # 2) 安装技能本体
     banner("步骤 1 / 4 · 下载并安装技能")
     if not install_skill(args.source, expand(args.local_path) if args.local_path else None,
@@ -664,7 +739,7 @@ def main():
     log("技能目录：%s" % dest)
     log("Python venv：%s" % (py if py else "（未创建/跳过）"))
     log("脚本实测：%d/%d 通过" % (pass_n, total))
-    log("常驻规则：%s" % ("已写入" if ok else "失败"))
+    log("常驻规则：%s" % ("已处理" if ok else "失败"))
     log("调用示例：%s scripts/desensitize.py scan <文件>"
         % (str(py) if py else "python"), "INFO")
 
