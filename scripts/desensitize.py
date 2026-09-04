@@ -121,6 +121,8 @@ WS_RESTORE = "06_审计与回填/回填成果"
 WS_LOCAL_ONLY = "07_本地处理不外发"   # 🚫 不外发：仅本地处理、未脱敏原文，严禁上云、不得与脱敏副本一起存放
 WS_INDEX_JSON = "成果索引.json"
 WS_INDEX_MD = "成果索引.md"
+# 映射表（重识别钥匙）是唯一含原值的文件，其路径本身即是攻击面：对话内与成果索引回显一律不展示其绝对路径。
+WS_KEYS_MASK = "🔒 已加密封存（留本地，不展示路径）"
 
 
 def _ws_root(args):
@@ -176,15 +178,18 @@ def _refresh_index(ws):
     def _exists(rel):
         return os.path.exists(os.path.join(ws, rel))
     entries = []
-    def _add(name, rel, tag, desc):
+    def _add(name, rel, tag, desc, hide_path=False):
         if _exists(rel):
-            entries.append({"name": name, "path": os.path.abspath(os.path.join(ws, rel)),
-                            "tag": tag, "desc": desc})
+            # 映射表（重识别钥匙）路径为攻击面：对话内 / 成果索引.md / status 回显一律以掩码替代。
+            # 真实绝对路径仅写入 成果索引.json（本地文件，供本机复核，不默认回显到对话）。
+            real = os.path.abspath(os.path.join(ws, rel))
+            entries.append({"name": name, "path": real, "tag": tag, "desc": desc,
+                            "display": WS_KEYS_MASK if hide_path else real})
     _add("预处理确认单", WS_PREPROC_SUMMARY, "内部", "外发清单、OCR 校对、异常清单、确认闸门")
     _add("未脱敏副本·解密与原始", WS_READY, "保密", "严禁上云：已解密未脱敏副本、原可直接处理文件")
     _add("未脱敏副本·OCR 待校对", WS_OCR, "保密", "严禁上云：OCR 识别文本，须逐字校对")
     _add("脱敏副本", WS_DESEN, "可上云", "★唯一允许上传云端的目录")
-    _add("映射表", WS_KEYS, "保密", "重识别钥匙，绝不随副本上传")
+    _add("映射表", WS_KEYS, "保密", "重识别钥匙，绝不随副本上传", hide_path=True)
     _add("上云前自检报告", WS_SELFCHECK, "内部", "四处校对提醒 + 确认闸门，上云前必读")
     _add("审计记录", WS_AUDIT, "内部", "对齐 12 项自查清单的审计文档")
     _add("回填成果", WS_RESTORE, "保密", "含原值内部文档，勿随副本外传")
@@ -201,7 +206,7 @@ def _refresh_index(ws):
          "| 阶段 / 产物 | 可上云状态 | 路径 | 说明 |",
          "| --- | --- | --- | --- |"]
     for e in entries:
-        L.append("| %s | **%s** | `%s` | %s |" % (e["name"], e["tag"], e["path"], e["desc"]))
+        L.append("| %s | **%s** | %s | %s |" % (e["name"], e["tag"], e["display"], e["desc"]))
     L.append("")
     L.append("> 仅 `03_脱敏副本/` 可上云；`02_未脱敏副本/`、`04_映射表_保密/`、`06_审计与回填/回填成果/`、`07_本地处理不外发/` 均须留本地。")
     L.append("> 上云前请先阅读 `05_上云前自检报告.md` 并完成四处校对。")
@@ -2098,13 +2103,13 @@ def cmd_run(args):
     print("\n完成。")
     if ws:
         print("  脱敏副本目录 : %s" % os.path.abspath(out_root))
-        print("  加密映射表   : %s" % enc_info["mapping_file"])
+        print("  加密映射表   : %s" % WS_KEYS_MASK)
     else:
         # 非工作区模式：标注中文别名，便于理解与工作区目录的对应关系
         print("  脱敏副本目录 : %s  （= 工作区模式的 03_脱敏副本/）" % os.path.abspath(out_root))
-        print("  加密映射表   : %s  （= 工作区模式的 04_映射表_保密/）" % enc_info["mapping_file"])
+        print("  加密映射表   : %s  （= 工作区模式的 04_映射表_保密/）" % WS_KEYS_MASK)
     if enc_info.get("key_file"):
-        print("  密钥文件     : %s  (权限 600，请勿与脱敏副本一同上传)" % enc_info["key_file"])
+        print("  密钥文件     : %s" % WS_KEYS_MASK)
     else:
         print("  密钥         : 由 --passphrase 派生（salt 已存于 keys 目录）")
     print("  命中统计     : %s" % json.dumps(total, ensure_ascii=False))
@@ -2321,6 +2326,20 @@ def cmd_audit(args):
     L = []
     L.append("# 脱敏审计记录（由 desensitize.py audit 自动生成）")
     L.append("")
+    # ── 审计摘要（置顶，供非专业人员一屏内掌握结论；细节见后九节）──
+    _risk_summary = "低" if (safety == "unique" and not skipped_detail) else "中"
+    _upload_scope = "仅 `03_脱敏副本/`（已脱敏，可上云）；原始文件 / 未脱敏副本 / 映射表均留本地"
+    _compliance = "已脱敏、可上云，原始与映射表留本地分离" if _risk_summary == "低" else "存在歧义或未处理文件，须人工复核后再上云"
+    L.append("## 审计摘要")
+    L.append("- 风险自评：**%s**" % _risk_summary)
+    L.append("- 外发范围：%s" % _upload_scope)
+    L.append("- 结论：%s" % _compliance)
+    L.append("- 脱敏方式：%s（%s）" % (mode, safety))
+    L.append("")
+    L.append("> 完整审计见下方九节；上云前仍须逐项确认 12 项自查清单，禁止「一键脱敏即上云」。")
+    L.append("")
+    L.append("---")
+    L.append("")
     L.append("- 生成时间：%s" % datetime.now().isoformat(timespec="seconds"))
     L.append("- 任务时间：%s" % time)
     L.append("- 任务描述：基于 `run` 报告自动生成；业务背景请人工补充")
@@ -2348,6 +2367,18 @@ def cmd_audit(args):
         L.append("- redact 不可逆，被抑制字段不可还原（精度：相关字段已删除）")
     else:
         L.append("- 数值精度：仅去标识、保留精确数值（未泛化/随机化），满足财务/审计红线")
+    L.append("")
+    L.append("### 脱敏前后对照示例（仅脱敏后形态，不含原值）")
+    L.append("脱敏保留字段语义（可用于统计 / 分组），但无法还原个人身份：")
+    L.append("")
+    L.append("| 类型 | 脱敏后示例 | 说明 |")
+    L.append("| --- | --- | --- |")
+    L.append("| 手机号 | `138****8000` | 保留前 3 后 4，可用于区号 / 号段统计 |")
+    L.append("| 身份证 | `4*****************` | 保留首位，其余掩码 |")
+    L.append("| 姓名 | `张**` | 保留姓氏 / 首字 |")
+    L.append("| 银行卡 | `6222****...` | 保留发卡行前缀（BIN） |")
+    L.append("")
+    L.append("> 精确的「原值 ↔ 令牌」对照仅存于加密映射表（重识别钥匙，留本地、不展示），不在此列出原值。")
     L.append("")
     L.append("## 四、密钥与映射表（重识别钥匙，须分离/加密/最小权限）")
     L.append("- 加密映射表：%s" % mapping_file)
@@ -2423,7 +2454,7 @@ def cmd_status(args):
     print("脱敏工作区成果索引：%s" % os.path.abspath(ws))
     print("=" * 60)
     for e in json.load(open(os.path.join(ws, WS_INDEX_JSON), encoding="utf-8"))["entries"]:
-        print("  [%-4s] %-22s %s" % (e["tag"], e["name"], e["path"]))
+        print("  [%-4s] %-22s %s" % (e["tag"], e["name"], e.get("display", e["path"])))
     print("-" * 60)
     print("仅 `03_脱敏副本/` 可上云；上云前请阅读 `05_上云前自检报告.md` 并完成四处校对。")
     print("详情见：%s" % os.path.abspath(md))
